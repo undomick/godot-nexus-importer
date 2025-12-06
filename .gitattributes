@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
-* text=auto
+* text=auto eol=lf
+
+# Ignore everything
+* export-ignore
+
+# Make exceptions
+addons/ -export-ignore
+addons/** -export-ignore
