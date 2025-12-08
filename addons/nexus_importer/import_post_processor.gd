@@ -30,23 +30,22 @@ var root_processor = RootProcessor.new()
 var vertex_color_processor = VertexColorProcessor.new()
 
 
-# This is the main function of the "Worker".
-# It is called by Godot after the GLTF has been converted to a PackedScene.
+# It is called by Godot after the GLTF has been converted to a PackedScene but before saving.
 func _post_import(scene: Node) -> Object:
 	var gltf_path = get_source_file()
 	
-	# === DIE ROBUSTE METHODE (NACH BLENDER-STUDIO-VORBILD) ===
-	# Wir ignorieren die Metadaten des 'scene'-Node und lesen sie direkt
-	# aus der ursprünglichen .gltf-Datei. Das ist die Quelle der Wahrheit.
+	# === ROBUST METHOD (BLENDER STUDIO STYLE) ===
+	# We ignore the metadata of the 'scene' node passed by Godot and read it directly
+	# from the original .gltf file. This is the absolute source of truth.
 	var scene_meta = _get_nexus_metadata_from_file(gltf_path)
 	if scene_meta.is_empty():
-		# Dies ist keine Nexus-Datei, also nichts tun.
+		# This is not a Nexus file, do nothing.
 		return scene
 	
-	# Erstelle die .tscn-Datei, falls sie nicht existiert.
+	# Create the wrapper .tscn file if it does not exist yet.
 	_ensure_scene_file_exists(gltf_path, scene)
 		
-	# Handle spezielle Export-Typen
+	# Handle special export types
 	var export_type = scene_meta.get("export_type")
 	if export_type == "ANIMATION_LIB":
 		animation_processor.process(scene, scene_meta)
@@ -54,10 +53,12 @@ func _post_import(scene: Node) -> Object:
 	if export_type == "MULTIMESH_MANIFEST":
 		return multimesh_processor.process(gltf_path, scene_meta)
 
-	# Führe alle strukturellen Prozessoren aus.
-	print("Nexus Worker: Processing nodes for '%s'..." % scene.name) # Debug-Ausgabe
+	# Execute all structural processors.
+	print("Nexus Worker: Processing nodes for '%s'..." % scene.name)
+	
 	root_processor.set_collision_layers(scene, scene_meta)
 	navmesh_processor.process(scene, scene_meta)
+	
 	_process_node_recursively(scene, scene, scene_meta)
 	_process_materials_recursively(scene)
 	
@@ -67,11 +68,12 @@ func _get_nexus_metadata_from_file(gltf_path: String) -> Dictionary:
 	if not FileAccess.file_exists(gltf_path): return {}
 	var file = FileAccess.open(gltf_path, FileAccess.READ)
 	if not file: return {}
+	
 	var json = JSON.new()
 	if json.parse(file.get_as_text()) != OK: return {}
 	var gltf_data = json.get_data()
 	
-	# 1. Standard
+	# 1. Standard Location
 	var meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get("NEXUS_ASSET_METADATA", {})
 	
 	# 2. Optimizer Fallback (Asset Extras)
@@ -111,9 +113,10 @@ func _ensure_scene_file_exists(gltf_path: String, imported_scene: Node):
 	root_node.free()
 
 
-# --- Recursive Processor Calls (Unchanged) ---
+# --- Recursive Processor Calls ---
+
 func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
-	print("Processing Node: %s (Type: %s)" % [node.name, node.get_class()])
+	# print("Processing Node: %s (Type: %s)" % [node.name, node.get_class()])
 	
 	for i in range(node.get_child_count() - 1, -1, -1):
 		var child = node.get_child(i)
