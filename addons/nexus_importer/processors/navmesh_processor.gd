@@ -1,67 +1,87 @@
-# file: addons/nexus_importer/processors/navmesh_processor.gd
 @tool
 extends Object
 
 # This function is called for assets with the 'NAVMESH' root type.
-# It finds the source mesh, configures, and bakes the navigation mesh.
+# It manually extracts mesh geometry to bypass SceneTree requirements during import.
 func process(scene_root: Node, scene_meta: Dictionary) -> void:
 	if scene_meta.get("root_type") != "NAVMESH":
 		return
 
 	if not scene_root is NavigationRegion3D:
-		push_error("Nexus NavMesh: Root node is not a NavigationRegion3D, cannot bake NavMesh.")
+		push_error("Nexus NavMesh: Root node is not a NavigationRegion3D.")
 		return
 	
-	var navmesh_settings = scene_meta.get("navmesh_settings")
-	if not navmesh_settings:
-		push_warning("Nexus NavMesh: No 'navmesh_settings' found in metadata. Using default values.")
-		navmesh_settings = {}
+	var navmesh_settings = scene_meta.get("navmesh_settings", {})
 	
-	# Find the first MeshInstance3D in the scene, which will be our bake source.
-	var mesh_instance = _find_node_of_type(scene_root, "MeshInstance3D")
-	if not mesh_instance:
-		push_error("Nexus NavMesh: No MeshInstance3D found inside NavigationRegion3D to bake from.")
-		return
-	
-	print("Nexus Processor: Found source mesh '%s' for NavMesh baking." % mesh_instance.name)
-	
-	# Create and configure a new NavigationMesh resource.
+	# 1. Create and configure the NavigationMesh resource.
 	var nav_mesh = NavigationMesh.new()
 	nav_mesh.cell_size = navmesh_settings.get("cell_size", 0.25)
 	nav_mesh.agent_height = navmesh_settings.get("agent_height", 2.0)
 	nav_mesh.agent_radius = navmesh_settings.get("agent_radius", 0.5)
 	
-	# Check if the vertex color processor marked this mesh as having cost data.
-	if mesh_instance.has_meta("has_nav_cost_data"):
-		# Tell the baker to use the geometry of child nodes.
-		nav_mesh.source_geometry_mode = NavigationMesh.SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN
-		
-		# Set the travel cost on the region. This triggers Godot to use the vertex colors.
+	# Configure to use Meshes (Visual Geometry)
+	nav_mesh.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_MESH_INSTANCES
+	
+	# Check for cost metadata on the first mesh found (to apply global travel cost)
+	var first_mesh = _find_first_mesh(scene_root)
+	if first_mesh and first_mesh.has_meta("has_nav_cost_data"):
 		var travel_cost = navmesh_settings.get("travel_cost", 1.0)
 		scene_root.travel_cost = travel_cost
 		print(" -> NavCost data found. Travel cost multiplier set to %f." % travel_cost)
 
-	# Assign the resource to the region.
 	scene_root.navigation_mesh = nav_mesh
 	
-	print(" -> Configured NavigationMesh resource. Starting bake...")
+	print(" -> Starting NavMesh bake (Manual Parsing Mode)...")
 
-	# Start the baking process.
-	NavigationServer3D.region_bake_navigation_mesh(nav_mesh, scene_root)
+	# 2. MANUAL PARSING (The Fix)
+	# Instead of asking Godot to parse the tree (which fails because there is no tree),
+	# we manually feed the geometry into the SourceGeometryData container.
+	var source_geometry_data = NavigationMeshSourceGeometryData3D.new()
+	
+	# We start traversing from the scene root. The root transform is Identity relative to itself.
+	_parse_nodes_recursive(scene_root, Transform3D.IDENTITY, source_geometry_data)
+	
+	# 3. Bake using the collected data
+	NavigationServer3D.bake_from_source_geometry_data(nav_mesh, source_geometry_data)
 
 	print(" -> NavMesh bake completed.")
 
-	# Optional but recommended: Remove the visible source mesh after baking.
-	mesh_instance.queue_free()
+	# 4. Cleanup: Remove the source meshes since the data is now baked into the navmesh.
+	_free_source_meshes_recursive(scene_root)
 
 
-# Helper to find the first node of a specific class type in a scene tree.
-func _find_node_of_type(root: Node, class_type: StringName) -> Node:
-	var queue = [root]
-	while not queue.is_empty():
-		var current = queue.pop_front()
-		if current.get_class() == class_type:
-			return current
-		for child in current.get_children():
-			queue.push_back(child)
+# Recursively collects geometry from MeshInstance3D nodes.
+# We calculate the accumulated transform manually to simulate "global" positions relative to the root.
+func _parse_nodes_recursive(node: Node, parent_accumulated_transform: Transform3D, source_data: NavigationMeshSourceGeometryData3D):
+	var current_transform = parent_accumulated_transform
+	
+	# If the node has a 3D transform, combine it with the parent's transform
+	if node is Node3D:
+		current_transform = parent_accumulated_transform * node.transform
+		
+	# If it's a MeshInstance, add it to the bake data
+	if node is MeshInstance3D and node.mesh:
+		source_data.add_mesh(node.mesh, current_transform)
+	
+	# Process children
+	for child in node.get_children():
+		_parse_nodes_recursive(child, current_transform, source_data)
+
+
+# Helper to find the first mesh for metadata checking
+func _find_first_mesh(node: Node) -> MeshInstance3D:
+	if node is MeshInstance3D: return node
+	for child in node.get_children():
+		var res = _find_first_mesh(child)
+		if res: return res
 	return null
+
+# Helper to remove source meshes after baking to prevent double geometry
+func _free_source_meshes_recursive(node: Node):
+	# We iterate backwards when removing children to be safe
+	for i in range(node.get_child_count() - 1, -1, -1):
+		var child = node.get_child(i)
+		_free_source_meshes_recursive(child)
+		
+	if node is MeshInstance3D:
+		node.queue_free()

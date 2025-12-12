@@ -34,26 +34,34 @@ var vertex_color_processor = VertexColorProcessor.new()
 func _post_import(scene: Node) -> Object:
 	var gltf_path = get_source_file()
 	
-	# === ROBUST METHOD (BLENDER STUDIO STYLE) ===
-	# We ignore the metadata of the 'scene' node passed by Godot and read it directly
-	# from the original .gltf file. This is the absolute source of truth.
 	var scene_meta = _get_nexus_metadata_from_file(gltf_path)
 	if scene_meta.is_empty():
-		# This is not a Nexus file, do nothing.
 		return scene
 	
-	# Create the wrapper .tscn file if it does not exist yet.
-	_ensure_scene_file_exists(gltf_path, scene)
-		
-	# Handle special export types
 	var export_type = scene_meta.get("export_type")
+	var root_type = scene_meta.get("root_type")
+	
+	# --- EXPORT TYPE CHECKS ---
+	
 	if export_type == "ANIMATION_LIB":
 		animation_processor.process(scene, scene_meta)
 		return scene 
+		
 	if export_type == "MULTIMESH_MANIFEST":
 		return multimesh_processor.process(gltf_path, scene_meta)
 
-	# Execute all structural processors.
+	# --- TSCN GENERATION LOGIC ---
+	
+	# We skip auto-creation of .tscn files for NavMeshes to avoid confusion.
+	# NavMeshes are data containers and should be dragged directly from the .gltf into the level.
+	if root_type == "NAVMESH":
+		print("Nexus Info: Asset '%s' is a Navigation Region. Skipping auto-TSCN creation." % scene.name)
+		print(" -> Tip: Drag the .gltf file directly into your level scene to use the NavMesh.")
+	else:
+		_ensure_scene_file_exists(gltf_path, scene)
+
+	# --- NODE PROCESSING ---
+
 	print("Nexus Worker: Processing nodes for '%s'..." % scene.name)
 	
 	root_processor.set_collision_layers(scene, scene_meta)
@@ -61,6 +69,9 @@ func _post_import(scene: Node) -> Object:
 	
 	_process_node_recursively(scene, scene, scene_meta)
 	_process_materials_recursively(scene)
+	
+	# Apply Loop Settings for Standard Assets
+	_apply_animation_settings(scene, scene_meta)
 	
 	return scene
 
@@ -82,8 +93,7 @@ func _get_nexus_metadata_from_file(gltf_path: String) -> Dictionary:
 		
 	return meta
 
-# This function is the direct equivalent of `ensure_scene_for_gltf` from the Blender Studio addon.
-# Its only job is to create the wrapper .tscn if it doesn't already exist.
+# This function creates the wrapper .tscn if it doesn't already exist.
 func _ensure_scene_file_exists(gltf_path: String, imported_scene: Node):
 	var scene_path = gltf_path.get_base_dir().path_join(imported_scene.name + ".tscn")
 
@@ -112,12 +122,72 @@ func _ensure_scene_file_exists(gltf_path: String, imported_scene: Node):
 	
 	root_node.free()
 
+func _apply_animation_settings(scene: Node, meta: Dictionary):
+	var loop_data = meta.get("nexus_animation_loops", {})
+	var marker_data = meta.get("nexus_animation_markers", {})
+	
+	if loop_data.is_empty() and marker_data.is_empty():
+		return
+
+	var anim_player = _find_animation_player(scene)
+	if not anim_player: return
+
+	var library = anim_player.get_animation_library("")
+	if not library: return
+
+	for anim_name in library.get_animation_list():
+		var anim: Animation = library.get_animation(anim_name)
+		
+		# 1. Apply Loop
+		if loop_data.has(anim_name):
+			var loop_type = loop_data[anim_name]
+			match loop_type:
+				"LOOP": anim.loop_mode = Animation.LOOP_LINEAR
+				"PINGPONG": anim.loop_mode = Animation.LOOP_PINGPONG
+				"ONCE": anim.loop_mode = Animation.LOOP_NONE
+		
+		# 2. Apply Markers
+		if marker_data.has(anim_name):
+			var markers = marker_data[anim_name]
+			
+			var track_idx = -1
+			# Check if track exists
+			for i in range(anim.get_track_count()):
+				if anim.track_get_type(i) == Animation.TYPE_METHOD and anim.track_get_path(i) == NodePath("."):
+					track_idx = i
+					break
+			
+			if track_idx == -1:
+				track_idx = anim.add_track(Animation.TYPE_METHOD)
+				anim.track_set_path(track_idx, ".")
+			
+			# Clear existing keys
+			while anim.track_get_key_count(track_idx) > 0:
+				anim.track_remove_key(track_idx, 0)
+				
+			# Add new Marker Keys
+			for m in markers:
+				var time = m["time"]
+				var event_name = m["name"]
+				
+				var key_data = {
+					"method": "on_nexus_event", 
+					"args": [event_name]
+				}
+				anim.track_insert_key(track_idx, time, key_data)
+				
+			print(" -> Added %d markers to animation '%s'." % [markers.size(), anim_name])
+
+func _find_animation_player(node: Node) -> AnimationPlayer:
+	if node is AnimationPlayer: return node
+	for child in node.get_children():
+		var res = _find_animation_player(child)
+		if res: return res
+	return null
 
 # --- Recursive Processor Calls ---
 
 func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
-	# print("Processing Node: %s (Type: %s)" % [node.name, node.get_class()])
-	
 	for i in range(node.get_child_count() - 1, -1, -1):
 		var child = node.get_child(i)
 		_process_node_recursively(child, root, scene_meta)
