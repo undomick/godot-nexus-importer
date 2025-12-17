@@ -4,12 +4,12 @@ extends EditorScenePostImport
 const NEXUS_ASSET_META = "NEXUS_ASSET_METADATA"
 const NEXUS_NODE_META = "NEXUS_NODE_METADATA"
 
-# All processor instances are loaded here.
 const AnimationProcessor = preload("res://addons/nexus_importer/processors/animation_processor.gd")
 const BoneAttachmentProcessor = preload("res://addons/nexus_importer/processors/bone_attachment_processor.gd")
 const CollisionProcessor = preload("res://addons/nexus_importer/processors/collision_processor.gd")
 const InstancingProcessor = preload("res://addons/nexus_importer/processors/instancing_processor.gd")
 const LightProcessor = preload("res://addons/nexus_importer/processors/light_processor.gd")
+const LodProcessor = preload("res://addons/nexus_importer/processors/lod_processor.gd")
 const MaterialProcessor = preload("res://addons/nexus_importer/processors/material_processor.gd")
 const MultiMeshProcessor = preload("res://addons/nexus_importer/processors/multimesh_processor.gd")
 const NavMeshProcessor = preload("res://addons/nexus_importer/processors/navmesh_processor.gd")
@@ -22,6 +22,7 @@ var bone_attachment_processor = BoneAttachmentProcessor.new()
 var collision_processor = CollisionProcessor.new()
 var instancing_processor = InstancingProcessor.new()
 var light_processor = LightProcessor.new()
+var lod_processor = LodProcessor.new()
 var material_processor = MaterialProcessor.new()
 var multimesh_processor = MultiMeshProcessor.new()
 var navmesh_processor = NavMeshProcessor.new()
@@ -30,8 +31,10 @@ var root_processor = RootProcessor.new()
 var vertex_color_processor = VertexColorProcessor.new()
 
 
-# It is called by Godot after the GLTF has been converted to a PackedScene but before saving.
 func _post_import(scene: Node) -> Object:
+	# --- DEBUG ZEILE ---
+	print("Nexus Entry: _post_import called for '%s'" % get_source_file())
+	
 	var gltf_path = get_source_file()
 	
 	var scene_meta = _get_nexus_metadata_from_file(gltf_path)
@@ -39,7 +42,6 @@ func _post_import(scene: Node) -> Object:
 		return scene
 	
 	var export_type = scene_meta.get("export_type")
-	var root_type = scene_meta.get("root_type")
 	
 	# --- EXPORT TYPE CHECKS ---
 	
@@ -50,16 +52,6 @@ func _post_import(scene: Node) -> Object:
 	if export_type == "MULTIMESH_MANIFEST":
 		return multimesh_processor.process(gltf_path, scene_meta)
 
-	# --- TSCN GENERATION LOGIC ---
-	
-	# We skip auto-creation of .tscn files for NavMeshes to avoid confusion.
-	# NavMeshes are data containers and should be dragged directly from the .gltf into the level.
-	if root_type == "NAVMESH":
-		print("Nexus Info: Asset '%s' is a Navigation Region. Skipping auto-TSCN creation." % scene.name)
-		print(" -> Tip: Drag the .gltf file directly into your level scene to use the NavMesh.")
-	else:
-		_ensure_scene_file_exists(gltf_path, scene)
-
 	# --- NODE PROCESSING ---
 
 	print("Nexus Worker: Processing nodes for '%s'..." % scene.name)
@@ -68,10 +60,11 @@ func _post_import(scene: Node) -> Object:
 	navmesh_processor.process(scene, scene_meta)
 	
 	_process_node_recursively(scene, scene, scene_meta)
-	_process_materials_recursively(scene)
 	
-	# Apply Loop Settings for Standard Assets
+	_process_materials_recursively(scene)
 	_apply_animation_settings(scene, scene_meta)
+	
+	lod_processor.process(scene)
 	
 	return scene
 
@@ -84,43 +77,18 @@ func _get_nexus_metadata_from_file(gltf_path: String) -> Dictionary:
 	if json.parse(file.get_as_text()) != OK: return {}
 	var gltf_data = json.get_data()
 	
-	# 1. Standard Location
-	var meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get("NEXUS_ASSET_METADATA", {})
+	# 1. Check Root Extras (MultiMesh Manifests usually land here)
+	var meta = gltf_data.get("extras", {}).get("NEXUS_ASSET_METADATA", {})
 	
-	# 2. Optimizer Fallback (Asset Extras)
+	# 2. Check Scene Extras (Standard Assets)
+	if meta.is_empty():
+		meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get("NEXUS_ASSET_METADATA", {})
+	
+	# 3. Check Asset Extras (Optimizer Fallback)
 	if meta.is_empty():
 		meta = gltf_data.get("asset", {}).get("extras", {}).get("NEXUS_ASSET_METADATA", {})
 		
 	return meta
-
-# This function creates the wrapper .tscn if it doesn't already exist.
-func _ensure_scene_file_exists(gltf_path: String, imported_scene: Node):
-	var scene_path = gltf_path.get_base_dir().path_join(imported_scene.name + ".tscn")
-
-	if FileAccess.file_exists(scene_path):
-		return # The file already exists, our job is done.
-
-	print("Nexus Worker: Proactively creating missing scene file at '%s'." % scene_path)
-	
-	var packed_scene = PackedScene.new()
-	var root_node = Node3D.new()
-	root_node.name = imported_scene.name
-
-	# Load the original, unprocessed GLTF as a resource to instance it.
-	var gltf_resource: PackedScene = ResourceLoader.load(gltf_path)
-	if not gltf_resource:
-		push_error("Nexus Worker: Could not load GLTF resource to create scene instance.")
-		return
-		
-	var gltf_instance = gltf_resource.instantiate()
-	
-	root_node.add_child(gltf_instance)
-	gltf_instance.owner = root_node
-	
-	if packed_scene.pack(root_node) == OK:
-		ResourceSaver.save(packed_scene, scene_path)
-	
-	root_node.free()
 
 func _apply_animation_settings(scene: Node, meta: Dictionary):
 	var loop_data = meta.get("nexus_animation_loops", {})
@@ -149,9 +117,7 @@ func _apply_animation_settings(scene: Node, meta: Dictionary):
 		# 2. Apply Markers
 		if marker_data.has(anim_name):
 			var markers = marker_data[anim_name]
-			
 			var track_idx = -1
-			# Check if track exists
 			for i in range(anim.get_track_count()):
 				if anim.track_get_type(i) == Animation.TYPE_METHOD and anim.track_get_path(i) == NodePath("."):
 					track_idx = i
@@ -161,20 +127,12 @@ func _apply_animation_settings(scene: Node, meta: Dictionary):
 				track_idx = anim.add_track(Animation.TYPE_METHOD)
 				anim.track_set_path(track_idx, ".")
 			
-			# Clear existing keys
 			while anim.track_get_key_count(track_idx) > 0:
 				anim.track_remove_key(track_idx, 0)
 				
-			# Add new Marker Keys
 			for m in markers:
-				var time = m["time"]
-				var event_name = m["name"]
-				
-				var key_data = {
-					"method": "on_nexus_event", 
-					"args": [event_name]
-				}
-				anim.track_insert_key(track_idx, time, key_data)
+				var key_data = {"method": "on_nexus_event", "args": [m["name"]]}
+				anim.track_insert_key(track_idx, m["time"], key_data)
 				
 			print(" -> Added %d markers to animation '%s'." % [markers.size(), anim_name])
 
@@ -196,13 +154,19 @@ func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
 	if not NEXUS_NODE_META in node_extras: return
 	var node_meta = node_extras[NEXUS_NODE_META]
 
+	# --- LOD GATEKEEPER ---
+	if node_meta.get("nexus_is_lod", false):
+		return
+	# ----------------------
+
 	if instancing_processor.process(node, node_meta, root): return
 	if light_processor.process(node, node_meta, root): return
 	if bone_attachment_processor.process(node, node_meta, root): return
 	if collision_processor.process(node, node_meta, root): return
 	
 	vertex_color_processor.process(node, node_meta)
-	node_processor.process(node, node_meta)
+	
+	node_processor.process(node, node_meta, scene_meta)
 	
 func _process_materials_recursively(node: Node):
 	material_processor.process(node)

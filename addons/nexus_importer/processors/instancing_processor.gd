@@ -3,28 +3,44 @@
 extends Object
 
 func process(node: Node, meta: Dictionary, root: Node) -> bool:
-	if not meta.has("nexus_asset_id"): return false
-	
-	var asset_id = meta["nexus_asset_id"]
-	var file = FileAccess.open('res://asset_index.json', FileAccess.READ)
-	if not file:
-		push_warning("Nexus Instancer: asset_index.json not found.")
-		return false
-	
-	var json = JSON.new()
-	if json.parse(file.get_as_text()) != OK: return false
-	var asset_index = json.get_data()
-	if not asset_index.has(asset_id):
-		push_error("Nexus Instancer: Asset ID '%s' not found." % asset_id)
-		return false
-		
-	var base_gltf_path = "res://" + asset_index[asset_id]["relative_path"]
-	var editable_scene_path = base_gltf_path.get_slice(".", 0) + "_editable.tscn"
-	var scene_to_instance_path = editable_scene_path if ResourceLoader.exists(editable_scene_path) else base_gltf_path
+	var scene_path = ""
 
-	var packed_scene = load(scene_to_instance_path)
+	# CASE A: Direct Placeholder Path (From Blender Empty)
+	if meta.has("nexus_placeholder_path"):
+		scene_path = meta["nexus_placeholder_path"]
+		
+	# CASE B: Nexus Collection Instance (From Blender Collection Instance)
+	elif meta.has("nexus_asset_id"):
+		var asset_id = meta["nexus_asset_id"]
+		var file = FileAccess.open('res://asset_index.json', FileAccess.READ)
+		if file:
+			var json = JSON.new()
+			if json.parse(file.get_as_text()) == OK:
+				var asset_index = json.get_data()
+				if asset_index.has(asset_id):
+					var base_gltf_path = "res://" + asset_index[asset_id]["relative_path"]
+					# Prefer editable scene if available
+					var editable_scene_path = base_gltf_path.get_slice(".", 0) + "_editable.tscn"
+					scene_path = editable_scene_path if ResourceLoader.exists(editable_scene_path) else base_gltf_path
+				else:
+					push_error("Nexus Instancer: Asset ID '%s' not found." % asset_id)
+					return false
+	
+	# If no valid path found, exit
+	if scene_path.is_empty():
+		return false
+
+	# --- INSTANTIATION LOGIC ---
+	
+	if not ResourceLoader.exists(scene_path):
+		push_error("Nexus Instancer: Target scene not found at '%s'" % scene_path)
+		return false
+
+	var packed_scene = load(scene_path)
 	if not packed_scene is PackedScene:
-		push_error("Nexus Instancer: Could not load scene at: " + scene_to_instance_path)
+		# Fallback: If it's not a Scene (e.g. a Texture or Mesh resource), we can't instantiate it directly as a Node replacement easily.
+		# For now, we strictly support .tscn / .glb / .scn
+		push_error("Nexus Instancer: Resource at '%s' is not a PackedScene." % scene_path)
 		return false
 		
 	var instance = packed_scene.instantiate()
@@ -38,7 +54,7 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	parent.add_child(instance)
 	instance.owner = root
 	
-	# THE CRITICAL FIX: Use free() to prevent name clashes.
 	node.free()
 	
+	print("Nexus Instancer: Replaced '%s' with instance of '%s'." % [instance.name, scene_path.get_file()])
 	return true

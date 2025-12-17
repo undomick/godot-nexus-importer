@@ -31,9 +31,6 @@ func process(node: Node):
 	if not _load_material_index():
 		return
 
-	# We duplicate the mesh resource once if we need to modify materials.
-	# This ensures we don't accidentally modify the shared original resource 
-	# if it is used elsewhere, while keeping instances sharing the same modified mesh linked.
 	var mesh_was_duplicated = false
 
 	for i in range(node.mesh.get_surface_count()):
@@ -53,10 +50,6 @@ func process(node: Node):
 					var tres_path = "res://" + _material_index[mat_id]["relative_path"]
 					
 					if ResourceLoader.exists(tres_path):
-						# CRITICAL FIX: Use CACHE_MODE_REPLACE.
-						# This forces Godot to reload the resource from disk, ignoring the RAM cache.
-						# This solves "ghosting" issues where material updates in Blender 
-						# were not visible in Godot until a restart.
 						var external_material = ResourceLoader.load(tres_path, "", ResourceLoader.CACHE_MODE_REPLACE)
 						
 						if is_instance_valid(external_material):

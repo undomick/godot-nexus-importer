@@ -2,8 +2,6 @@
 @tool
 extends Object
 
-# This function processes a 'MULTIMESH_MANIFEST' export type.
-# It builds a new MultiMeshInstance3D node from scratch based on the metadata.
 func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 	print("Nexus Processor: Processing as MultiMesh Manifest...")
 
@@ -12,15 +10,15 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 	var transforms = scene_meta.get("transforms")
 
 	if not source_asset_id or not transforms:
-		push_error("Nexus MultiMesh: Manifest '%s' is missing 'source_asset_id' or 'transforms'." % gltf_path)
+		push_error("Nexus MultiMesh: Manifest '%s' is missing data." % gltf_path)
 		return null
 
-	# 2. Load asset_index to find the path to the source asset
-	var index_file = FileAccess.open('res://asset_index.json', FileAccess.READ)
-	if not index_file:
-		push_error("Nexus MultiMesh: asset_index.json not found. Cannot resolve source.")
+	# 2. Load asset_index
+	if not FileAccess.file_exists('res://asset_index.json'):
+		push_error("Nexus MultiMesh: asset_index.json missing.")
 		return null
 	
+	var index_file = FileAccess.open('res://asset_index.json', FileAccess.READ)
 	var json = JSON.new()
 	if json.parse(index_file.get_as_text()) != OK:
 		push_error("Nexus MultiMesh: Could not parse asset_index.json.")
@@ -31,44 +29,65 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 		push_error("Nexus MultiMesh: Source Asset ID '%s' not found in asset_index.json." % source_asset_id)
 		return null
 
-	# 3. Extract the source mesh from the referenced scene
-	# We prefer the editable scene if it exists.
-	var base_gltf_path = "res://" + asset_index[source_asset_id]["relative_path"]
+	# 3. Extract source mesh
+	var rel_path = asset_index[source_asset_id]["relative_path"]
+	if rel_path.begins_with("res://"): rel_path = rel_path.substr(6)
+	var base_gltf_path = "res://" + rel_path
 	var editable_scene_path = base_gltf_path.get_slice(".", 0) + "_editable.tscn"
 	var source_scene_path = ""
 
-	if ResourceLoader.exists(editable_scene_path):
-		source_scene_path = editable_scene_path
+	if ResourceLoader.exists(editable_scene_path): source_scene_path = editable_scene_path
+	elif ResourceLoader.exists(base_gltf_path): source_scene_path = base_gltf_path
 	else:
-		source_scene_path = base_gltf_path
+		push_error("Nexus MultiMesh: Source file not found at '%s'." % base_gltf_path)
+		return null
 	
 	var packed_scene: PackedScene = load(source_scene_path)
-	
 	if not packed_scene:
-		push_error("Nexus MultiMesh: Could not load source scene at '%s'." % source_scene_path)
+		push_error("Nexus MultiMesh: Could not load source scene.")
 		return null
 		
 	var temp_instance = packed_scene.instantiate()
 	var source_mesh_instance = _find_node_of_type(temp_instance, "MeshInstance3D")
 	
 	if not source_mesh_instance or not source_mesh_instance.mesh:
-		push_error("Nexus MultiMesh: No MeshInstance3D with a valid mesh found in source scene '%s'." % source_scene_path)
-		temp_instance.queue_free()
+		push_error("Nexus MultiMesh: No MeshInstance3D found in source scene.")
+		temp_instance.free()
 		return null
 		
 	var source_mesh: Mesh = source_mesh_instance.mesh
-	# IMPORTANT: Free the temporary instance immediately!
-	temp_instance.queue_free()
+	temp_instance.free()
 
-	print(" -> Successfully extracted source mesh from '%s'." % source_scene_path)
+	# 4. Handle External Resource (UPDATE IN-PLACE STRATEGY)
+	var res_filename = gltf_path.get_file().get_basename() + ".multimesh.res"
+	var res_path = gltf_path.get_base_dir().path_join(res_filename)
+	
+	var multimesh_res: MultiMesh = null
+	
+	# Try to load existing resource. 
+	# If the scene is open, this gives us the instance currently in memory.
+	if ResourceLoader.exists(res_path):
+		multimesh_res = ResourceLoader.load(res_path)
+	
+	if not multimesh_res:
+		multimesh_res = MultiMesh.new()
 
-	# 4. Create and configure the MultiMesh resource
-	var multimesh_res = MultiMesh.new()
-	multimesh_res.mesh = source_mesh
+	# 5. Update Data
+	# CRITICAL: Reset count to 0 immediately. 
+	# This clears the internal buffer and allows changing flags (colors, format) safely,
+	# preventing the "Instance count must be 0" error during updates.
+	multimesh_res.instance_count = 0
+	
+	# Now configure flags
 	multimesh_res.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh_res.use_colors = false
+	multimesh_res.use_custom_data = false
+	multimesh_res.mesh = source_mesh
+	
+	# Allocate Memory
 	multimesh_res.instance_count = transforms.size()
 
-	# 5. Populate the resource with the exported transforms
+	# Populate Transforms
 	for i in range(transforms.size()):
 		var t_data = transforms[i]
 		
@@ -81,23 +100,29 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 		
 		multimesh_res.set_instance_transform(i, transform)
 
-	# 6. Create the MultiMeshInstance3D node that will use the resource
+	# 6. Save Resource to Disk
+	var err = ResourceSaver.save(multimesh_res, res_path)
+	if err != OK:
+		push_error("Nexus MultiMesh: Failed to save resource to '%s'" % res_path)
+		return null
+
+	print(" -> Saved MultiMesh resource to '%s'" % res_path)
+
+	# 7. Create Node
 	var mmi_node = MultiMeshInstance3D.new()
-	mmi_node.multimesh = multimesh_res
 	mmi_node.name = gltf_path.get_file().get_basename()
+	
+	# Assign the resource we just modified (it's the same pointer if loaded)
+	mmi_node.multimesh = multimesh_res
 
-	print(" -> Created MultiMeshInstance3D '%s' with %d instances." % [mmi_node.name, multimesh_res.instance_count])
-
-	# 7. Return the completed node so it can be saved as the imported scene
+	print(" -> Success: Created MultiMeshInstance with %d instances." % multimesh_res.instance_count)
 	return mmi_node
 
-
-# Helper to find the first node of a specific class type in a scene tree.
 func _find_node_of_type(root: Node, class_type: StringName) -> Node:
 	var queue = [root]
 	while not queue.is_empty():
 		var current = queue.pop_front()
-		if current.get_class() == class_type:
+		if current.is_class(class_type):
 			return current
 		for child in current.get_children():
 			queue.push_back(child)

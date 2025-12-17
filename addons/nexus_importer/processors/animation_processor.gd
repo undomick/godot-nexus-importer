@@ -29,11 +29,16 @@ func process(scene: Node, scene_meta: Dictionary):
 		
 	var anim_rename_map = scene_meta.get("animation_rename_map", {})
 	var animations_added = 0
+	var animations_removed = 0
 	
-	# Iterate through the rename map from the glTF metadata.
+	# Keep track of valid names to identify orphans later
+	var valid_library_names = []
+	
+	# --- 1. UPDATE / ADD PHASE ---
 	for old_name in anim_rename_map.keys():
 		var anim_info = anim_rename_map[old_name]
 		var new_name = anim_info["new_name"]
+		valid_library_names.append(new_name)
 		
 		# Check if the animation with the old name exists in the player.
 		if anim_player.has_animation(old_name):
@@ -45,20 +50,33 @@ func process(scene: Node, scene_meta: Dictionary):
 				"LOOP": loop_mode = Animation.LOOP_LINEAR
 				"PINGPONG": loop_mode = Animation.LOOP_PINGPONG
 			anim_resource.loop_mode = loop_mode
-
+			
 			# Add the animation with the NEW name to the library.
+			# This overwrites existing animations with the same name automatically.
 			anim_lib.add_animation(new_name, anim_resource)
 			animations_added += 1
-			print(" -> Added animation '%s' (from '%s') to library." % [new_name, old_name])
+			print(" -> Updated animation '%s' (Source: '%s')." % [new_name, old_name])
 		else:
 			push_warning("Nexus Animation: Source animation '%s' not found in AnimationPlayer." % old_name)
 
-	if animations_added > 0:
+	# --- 2. CLEANUP PHASE ---
+	# Remove animations from the library that are no longer in the Blender export.
+	var existing_names = anim_lib.get_animation_list()
+	for existing_name in existing_names:
+		if not existing_name in valid_library_names:
+			anim_lib.remove_animation(existing_name)
+			animations_removed += 1
+			print(" -> Removed obsolete animation '%s' from library." % existing_name)
+
+	# --- 3. SAVE PHASE ---
+	if animations_added > 0 or animations_removed > 0:
 		var err = ResourceSaver.save(anim_lib, anim_lib_path)
 		if err == OK:
-			print(" -> Successfully saved Animation Library to '%s'." % anim_lib_path)
+			print(" -> Successfully saved Animation Library to '%s' (+%d / -%d)." % [anim_lib_path, animations_added, animations_removed])
 		else:
 			push_error("Nexus Animation: Error saving Animation Library to '%s'. Error Code: %d" % [anim_lib_path, err])
+	else:
+		print(" -> No changes detected in Animation Library.")
 
 
 # Helper to find the first node of a specific class type in a scene tree.

@@ -33,20 +33,17 @@ func process(scene_root: Node, scene_meta: Dictionary) -> void:
 	
 	print(" -> Starting NavMesh bake (Manual Parsing Mode)...")
 
-	# 2. MANUAL PARSING (The Fix)
-	# Instead of asking Godot to parse the tree (which fails because there is no tree),
-	# we manually feed the geometry into the SourceGeometryData container.
 	var source_geometry_data = NavigationMeshSourceGeometryData3D.new()
 	
 	# We start traversing from the scene root. The root transform is Identity relative to itself.
 	_parse_nodes_recursive(scene_root, Transform3D.IDENTITY, source_geometry_data)
 	
-	# 3. Bake using the collected data
+	# 2. Bake using the collected data
 	NavigationServer3D.bake_from_source_geometry_data(nav_mesh, source_geometry_data)
 
 	print(" -> NavMesh bake completed.")
 
-	# 4. Cleanup: Remove the source meshes since the data is now baked into the navmesh.
+	# 3. Cleanup: Remove the source meshes since the data is now baked into the navmesh.
 	_free_source_meshes_recursive(scene_root)
 
 

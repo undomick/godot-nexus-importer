@@ -22,7 +22,7 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	new_light.name = node.name
 	new_light.transform = node.transform
 
-	# --- FIX 1: Color Constructor ---
+	# --- Color Constructor ---
 	# JSON arrays cannot be passed directly to Color(). We must unpack them.
 	var c_arr = light_data.get("color", [1.0, 1.0, 1.0])
 	# Safety check for array size
@@ -31,7 +31,7 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	else:
 		new_light.light_color = Color.WHITE
 
-	# --- FIX 2: Energy Conversion ---
+	# --- Energy Conversion ---
 	# Blender uses Watts (Radiant Flux). Godot uses an arbitrary Energy unit (default 1.0).
 	# A pragmatic conversion: 100 Watt (Bulb) ~= 1.0 Godot Energy.
 	# 1000 Watt (Blender default) -> 10.0 Godot Energy.
