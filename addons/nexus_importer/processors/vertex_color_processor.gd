@@ -18,7 +18,7 @@ func process(node: Node, meta: Dictionary) -> void:
 		
 		if channel_index == -1: continue
 
-		# Shader Attribute Name für Info-Ausgaben
+		# Shader Attribute Name for info output
 		var shader_attribute = "COLOR" if channel_index == 0 else "COLOR" + str(channel_index + 1)
 
 		match mapping:

@@ -7,9 +7,8 @@ var _index_loaded: bool = false
 
 # Loads the material_index.json file once per import session to minimize disk I/O.
 func _load_material_index() -> bool:
-	if _index_loaded:
-		return not _material_index.is_empty()
-
+	# Force reload index every time to ensure we get latest paths from Blender
+	# Performance hit is negligible for single asset import.
 	var file = FileAccess.open('res://material_index.json', FileAccess.READ)
 	if not file:
 		_index_loaded = true
@@ -23,40 +22,33 @@ func _load_material_index() -> bool:
 	return not _material_index.is_empty()
 
 # Main processing function called for every node.
-# It replaces placeholder materials with the actual .tres resources defined in the index.
-func process(node: Node):
-	if not node is MeshInstance3D or not is_instance_valid(node.mesh):
-		return
-
-	if not _load_material_index():
-		return
+func process(node: Node, stats: Dictionary):
+	if not node is MeshInstance3D or not is_instance_valid(node.mesh): return
+	if not _load_material_index(): return
 
 	var mesh_was_duplicated = false
+	var swapped_count = 0
 
 	for i in range(node.mesh.get_surface_count()):
 		var current_material: Material = node.mesh.surface_get_material(i)
-		
-		# If no material is assigned, we can't check for metadata.
-		if not is_instance_valid(current_material):
-			continue
+		if not is_instance_valid(current_material): continue
 			
-		# Check for the ID injected by the Blender extension hook.
 		if current_material.has_meta("extras"):
 			var extras = current_material.get_meta("extras")
 			if extras.has("nexus_material_id"):
 				var mat_id = extras["nexus_material_id"]
-				
 				if _material_index.has(mat_id):
-					var tres_path = "res://" + _material_index[mat_id]["relative_path"]
+					var rel_path = _material_index[mat_id]["relative_path"]
+					var tres_path = "res://" + rel_path if not rel_path.begins_with("res://") else rel_path
 					
 					if ResourceLoader.exists(tres_path):
 						var external_material = ResourceLoader.load(tres_path, "", ResourceLoader.CACHE_MODE_REPLACE)
-						
 						if is_instance_valid(external_material):
-							# Create a unique copy of the mesh before modifying it.
 							if not mesh_was_duplicated:
 								node.mesh = node.mesh.duplicate()
 								mesh_was_duplicated = true
-							
-							# Swap the placeholder with the actual Godot material.
 							node.mesh.surface_set_material(i, external_material)
+							swapped_count += 1
+	
+	# Update Stats
+	stats.materials += swapped_count

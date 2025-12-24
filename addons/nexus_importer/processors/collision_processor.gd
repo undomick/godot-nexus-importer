@@ -1,79 +1,67 @@
-# file: addons/nexus_importer/processors/collision_processor.gd
 @tool
 extends Object
 
-# This function processes collision metadata.
-# It handles both primitive shapes (Box, Sphere, etc.) and mesh-based shapes.
-func process(node: Node, meta: Dictionary, root: Node) -> bool:
-	var has_collision_data = meta.has("nexus_collision_dims") or meta.has("nexus_mesh_collision_shape")
-	if not has_collision_data:
-		return false
+func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: Node, stats: Dictionary) -> bool:
+	var has_collision_data = node_meta.has("nexus_collision_dims") or node_meta.has("nexus_mesh_collision_shape")
+	if not has_collision_data: return false
 
 	var parent = node.get_parent()
 	if not parent: return false
 
-	var shape_resource = _create_shape_resource(node, meta)
+	# 1. Read Offset
+	var col_data = node_meta.get("nexus_collision_dims", {})
+	var local_offset = Vector3(col_data.get("offset_x", 0), col_data.get("offset_y", 0), col_data.get("offset_z", 0))
+	
+	# 2. Create Resource
+	var shape_resource = _create_shape_resource(node, node_meta, local_offset)
 	if not shape_resource:
 		return false
-
-	var col_data = meta.get("nexus_collision_dims", {})
-	var shape_type = col_data.get("shape", "")
 	
-	# Calculate Transform
-	var local_offset = Vector3(
-		col_data.get("offset_x", 0.0),
-		col_data.get("offset_y", 0.0),
-		col_data.get("offset_z", 0.0)
-	)
-	var offset_transform = Transform3D(Basis(), local_offset)
-	var final_transform = node.transform * offset_transform
-
-	# Create the new node
+	# 3. Create and position the CollisionShape3D
 	var col_shape_node = CollisionShape3D.new()
 	col_shape_node.shape = shape_resource
-	col_shape_node.transform = final_transform
-
-	# --- LOGIC DECISION: REPLACE OR ADD SIBLING? ---
-	var should_replace = meta.get("discard_mesh", false)
 	
-	# Rule 1: Always replace if it is a WorldBoundary (infinite, invisible plane).
-	# Keeping the source mesh/empty serves no purpose here.
-	if shape_type == "WORLDBOUNDARY":
-		should_replace = true
-		
-	# Rule 2: If the source node is just a plain Node3D (Blender Empty), 
-	# and it is being used to define a primitive collider, replace it to clean up the tree.
-	if node.get_class() == "Node3D" and meta.has("nexus_collision_dims"):
-		should_replace = true
+	# Apply pivot correction: Node position = Original + Offset
+	var offset_transform = Transform3D(Basis(), local_offset)
+	col_shape_node.transform = node.transform * offset_transform
+	
+	# 4. Meta-Data (Surface Tags)
+	var final_tag = ""
+	if node_meta.has("nexus_surface_override"):
+		final_tag = node_meta["nexus_surface_override"]
+	elif scene_meta.has("physics_surface_name"):
+		final_tag = scene_meta["physics_surface_name"]
+	if not final_tag.is_empty():
+		col_shape_node.set_meta("surface", final_tag)
 
+	# --- REPLACE LOGIC ---
+	var shape_type = col_data.get("shape", "")
+	var discard_mesh = node_meta.get("discard_mesh", false)
+	var should_replace = discard_mesh
+	if shape_type == "WORLDBOUNDARY" or not node is MeshInstance3D: should_replace = true
+	if node.get_class() == "Node3D" and node_meta.has("nexus_collision_dims") and not node_meta.has("nexus_mesh_collision_shape"): should_replace = true
+
+	# STATS UPDATE STATT PRINT
+	stats.collisions += 1
+	
 	if should_replace:
-		# Case 1: Replace the node (Clean Hierarchy)
 		col_shape_node.name = node.name
-		
 		parent.remove_child(node)
 		parent.add_child(col_shape_node)
 		col_shape_node.owner = root
-		
 		node.free()
-		
-		print("Nexus Processor: Replaced '%s' with CollisionShape3D (%s)." % [col_shape_node.name, shape_type if shape_type else "MESH"])
 		return true
 	else:
-		# Case 2: Add as Sibling (Keep Visuals)
 		col_shape_node.name = node.name + "_Col"
-		
 		parent.add_child(col_shape_node)
 		col_shape_node.owner = root
-		
-		print("Nexus Processor: Added sibling CollisionShape3D '%s' for node '%s'." % [col_shape_node.name, node.name])
 		return false
 
-
-# --- INTERNAL HELPER FUNCTIONS ---
-
-func _create_shape_resource(node: Node, meta: Dictionary) -> Shape3D:
+func _create_shape_resource(node: Node, meta: Dictionary, offset: Vector3) -> Shape3D:
 	var shape_resource: Shape3D = null
-	if meta.has("nexus_collision_dims"):
+	
+	# CASE A: Primitive Shapes (Box, Sphere, etc.)
+	if meta.has("nexus_collision_dims") and not meta.has("nexus_mesh_collision_shape"):
 		var col_data = meta["nexus_collision_dims"]
 		match col_data.get("shape"):
 			"BOX":
@@ -84,28 +72,37 @@ func _create_shape_resource(node: Node, meta: Dictionary) -> Shape3D:
 				var shape = SphereShape3D.new()
 				shape.radius = col_data.get("radius", 0.5)
 				shape_resource = shape
-			"CAPSULE":
-				var shape = CapsuleShape3D.new()
+			"CAPSULE", "CYLINDER":
+				var shape = CapsuleShape3D.new() if col_data.get("shape") == "CAPSULE" else CylinderShape3D.new()
 				shape.radius = col_data.get("radius", 0.5)
-				shape.height = col_data.get("height", 1.0)
-				shape_resource = shape
-			"CYLINDER":
-				var shape = CylinderShape3D.new()
-				shape.radius = col_data.get("radius", 0.5)
-				shape.height = col_data.get("height", 1.0)
+				# FIX: Height Assignment
+				shape.height = col_data.get("height", 2.0)
 				shape_resource = shape
 			"WORLDBOUNDARY":
 				shape_resource = WorldBoundaryShape3D.new()
-			"HEIGHTMAP":
-				# Placeholder logic for HeightMap (requires image data handling usually)
-				pass 
 				
+	# CASE B: Mesh-Based Shapes (Convex, Trimesh)
 	elif meta.has("nexus_mesh_collision_shape") and node is MeshInstance3D:
 		var mesh: Mesh = node.mesh
 		if mesh:
 			var shape_type = meta["nexus_mesh_collision_shape"]
-			if shape_type == "TRIMESH":
-				shape_resource = mesh.create_trimesh_shape()
-			elif shape_type == "CONVEX_HULL":
-				shape_resource = mesh.create_convex_shape()
+			
+			if shape_type == "CONVEX_HULL":
+				var convex = mesh.create_convex_shape()
+				if offset != Vector3.ZERO:
+					var p = convex.points.duplicate()
+					for i in range(p.size()):
+						p[i] -= offset
+					convex.points = p
+				shape_resource = convex
+				
+			elif shape_type == "TRIMESH":
+				var trimesh = mesh.create_trimesh_shape()
+				if offset != Vector3.ZERO:
+					var f = trimesh.get_faces().duplicate()
+					for i in range(f.size()):
+						f[i] -= offset
+					trimesh.set_faces(f)
+				shape_resource = trimesh
+				
 	return shape_resource

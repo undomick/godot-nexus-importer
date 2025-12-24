@@ -16,6 +16,8 @@ const NavMeshProcessor = preload("res://addons/nexus_importer/processors/navmesh
 const NodeProcessor = preload("res://addons/nexus_importer/processors/node_processor.gd")
 const RootProcessor = preload("res://addons/nexus_importer/processors/root_processor.gd")
 const VertexColorProcessor = preload("res://addons/nexus_importer/processors/vertex_color_processor.gd")
+const CameraProcessor = preload("res://addons/nexus_importer/processors/camera_processor.gd")
+const PathProcessor = preload("res://addons/nexus_importer/processors/path_processor.gd")
 
 var animation_processor = AnimationProcessor.new()
 var bone_attachment_processor = BoneAttachmentProcessor.new()
@@ -29,121 +31,70 @@ var navmesh_processor = NavMeshProcessor.new()
 var node_processor = NodeProcessor.new()
 var root_processor = RootProcessor.new()
 var vertex_color_processor = VertexColorProcessor.new()
+var camera_processor = CameraProcessor.new()
+var path_processor = PathProcessor.new()
 
+# --- STATISTICS CONTAINER ---
+var stats = {
+	"paths": 0,
+	"materials": 0,
+	"collisions": 0,
+	"lods": 0,
+	"scripts": 0,
+	"instances": 0,
+	"lights": 0,
+	"cameras": 0,
+	"anims": 0,
+	"physics": "",
+	"surface": ""
+}
 
 func _post_import(scene: Node) -> Object:
-	# --- DEBUG ZEILE ---
-	print("Nexus Entry: _post_import called for '%s'" % get_source_file())
+	# Reset Stats
+	stats = {
+		"paths": 0,
+		"materials": 0,
+		"collisions": 0,
+		"lods": 0,
+		"scripts": 0,
+		"instances": 0,
+		"lights": 0,
+		"cameras": 0,
+		"anims": 0,
+		"physics": "",
+		"surface": ""
+	}
 	
 	var gltf_path = get_source_file()
-	
 	var scene_meta = _get_nexus_metadata_from_file(gltf_path)
-	if scene_meta.is_empty():
-		return scene
+	if scene_meta.is_empty(): return scene
 	
-	var export_type = scene_meta.get("export_type")
+	var export_type = scene_meta.get("export_type", "UNKNOWN")
+	var root_type = scene_meta.get("root_type", "Node3D")
 	
 	# --- EXPORT TYPE CHECKS ---
-	
 	if export_type == "ANIMATION_LIB":
-		animation_processor.process(scene, scene_meta)
-		return scene 
+		var anim_stats = animation_processor.process(scene, scene_meta)
+		_print_anim_lib_summary(scene.name, anim_stats)
+		return scene
 		
 	if export_type == "MULTIMESH_MANIFEST":
 		return multimesh_processor.process(gltf_path, scene_meta)
 
 	# --- NODE PROCESSING ---
-
-	print("Nexus Worker: Processing nodes for '%s'..." % scene.name)
-	
-	root_processor.set_collision_layers(scene, scene_meta)
+	root_processor.set_collision_layers(scene, scene_meta, stats)
 	navmesh_processor.process(scene, scene_meta)
 	
 	_process_node_recursively(scene, scene, scene_meta)
-	
 	_process_materials_recursively(scene)
 	_apply_animation_settings(scene, scene_meta)
 	
-	lod_processor.process(scene)
+	lod_processor.process(scene, stats)
+	
+	# --- FINAL SUMMARY LOG ---
+	_print_compact_summary(scene.name, export_type, root_type, scene_meta)
 	
 	return scene
-
-func _get_nexus_metadata_from_file(gltf_path: String) -> Dictionary:
-	if not FileAccess.file_exists(gltf_path): return {}
-	var file = FileAccess.open(gltf_path, FileAccess.READ)
-	if not file: return {}
-	
-	var json = JSON.new()
-	if json.parse(file.get_as_text()) != OK: return {}
-	var gltf_data = json.get_data()
-	
-	# 1. Check Root Extras (MultiMesh Manifests usually land here)
-	var meta = gltf_data.get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-	
-	# 2. Check Scene Extras (Standard Assets)
-	if meta.is_empty():
-		meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-	
-	# 3. Check Asset Extras (Optimizer Fallback)
-	if meta.is_empty():
-		meta = gltf_data.get("asset", {}).get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-		
-	return meta
-
-func _apply_animation_settings(scene: Node, meta: Dictionary):
-	var loop_data = meta.get("nexus_animation_loops", {})
-	var marker_data = meta.get("nexus_animation_markers", {})
-	
-	if loop_data.is_empty() and marker_data.is_empty():
-		return
-
-	var anim_player = _find_animation_player(scene)
-	if not anim_player: return
-
-	var library = anim_player.get_animation_library("")
-	if not library: return
-
-	for anim_name in library.get_animation_list():
-		var anim: Animation = library.get_animation(anim_name)
-		
-		# 1. Apply Loop
-		if loop_data.has(anim_name):
-			var loop_type = loop_data[anim_name]
-			match loop_type:
-				"LOOP": anim.loop_mode = Animation.LOOP_LINEAR
-				"PINGPONG": anim.loop_mode = Animation.LOOP_PINGPONG
-				"ONCE": anim.loop_mode = Animation.LOOP_NONE
-		
-		# 2. Apply Markers
-		if marker_data.has(anim_name):
-			var markers = marker_data[anim_name]
-			var track_idx = -1
-			for i in range(anim.get_track_count()):
-				if anim.track_get_type(i) == Animation.TYPE_METHOD and anim.track_get_path(i) == NodePath("."):
-					track_idx = i
-					break
-			
-			if track_idx == -1:
-				track_idx = anim.add_track(Animation.TYPE_METHOD)
-				anim.track_set_path(track_idx, ".")
-			
-			while anim.track_get_key_count(track_idx) > 0:
-				anim.track_remove_key(track_idx, 0)
-				
-			for m in markers:
-				var key_data = {"method": "on_nexus_event", "args": [m["name"]]}
-				anim.track_insert_key(track_idx, m["time"], key_data)
-				
-			print(" -> Added %d markers to animation '%s'." % [markers.size(), anim_name])
-
-func _find_animation_player(node: Node) -> AnimationPlayer:
-	if node is AnimationPlayer: return node
-	for child in node.get_children():
-		var res = _find_animation_player(child)
-		if res: return res
-	return null
-
-# --- Recursive Processor Calls ---
 
 func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
 	for i in range(node.get_child_count() - 1, -1, -1):
@@ -154,21 +105,159 @@ func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
 	if not NEXUS_NODE_META in node_extras: return
 	var node_meta = node_extras[NEXUS_NODE_META]
 
-	# --- LOD GATEKEEPER ---
-	if node_meta.get("nexus_is_lod", false):
-		return
-	# ----------------------
+	if node_meta.get("nexus_is_lod", false): return
 
-	if instancing_processor.process(node, node_meta, root): return
-	if light_processor.process(node, node_meta, root): return
+	if path_processor.process(node, node_meta, node.get_parent()):
+		stats.paths += 1 
+		return
+
+	if instancing_processor.process(node, node_meta, root): 
+		stats.instances += 1
+		return
+	if light_processor.process(node, node_meta, root): 
+		stats.lights += 1
+		return
+	if camera_processor.process(node, node_meta):
+		stats.cameras += 1
+		pass
 	if bone_attachment_processor.process(node, node_meta, root): return
-	if collision_processor.process(node, node_meta, root): return
+	
+	# Pass Stats to Collision Processor!
+	if collision_processor.process(node, node_meta, scene_meta, root, stats): 
+		return
 	
 	vertex_color_processor.process(node, node_meta)
-	
 	node_processor.process(node, node_meta, scene_meta)
-	
+
 func _process_materials_recursively(node: Node):
-	material_processor.process(node)
+	# Pass Stats to Material Processor!
+	material_processor.process(node, stats)
 	for child in node.get_children():
 		_process_materials_recursively(child)
+
+func _get_nexus_metadata_from_file(gltf_path: String) -> Dictionary:
+	if not FileAccess.file_exists(gltf_path): return {}
+	var file = FileAccess.open(gltf_path, FileAccess.READ)
+	if not file: return {}
+	
+	var json = JSON.new()
+	if json.parse(file.get_as_text()) != OK: return {}
+	var gltf_data = json.get_data()
+	
+	# 1. Check Root Extras
+	var meta = gltf_data.get("extras", {}).get("NEXUS_ASSET_METADATA", {})
+	
+	# 2. Check Scene Extras
+	if meta.is_empty():
+		meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get("NEXUS_ASSET_METADATA", {})
+	
+	# 3. Check Asset Extras
+	if meta.is_empty():
+		meta = gltf_data.get("asset", {}).get("extras", {}).get("NEXUS_ASSET_METADATA", {})
+		
+	return meta
+
+func _apply_animation_settings(scene: Node, meta: Dictionary):
+	# 1. Find Player (Always do this first)
+	var anim_player = _find_animation_player(scene)
+	if not anim_player: return
+
+	# 2. Get Library
+	var library = anim_player.get_animation_library("")
+	if not library: return
+
+	var anim_list = library.get_animation_list()
+	stats.anims = anim_list.size()
+	
+	# 3. Always set Autoplay & Current Animation for preview
+	# This ensures the animation is visible in the editor immediately.
+	if anim_list.size() > 0:
+		anim_player.autoplay = anim_list[0]
+		anim_player.current_animation = anim_list[0] 
+		anim_player.advance(0)
+
+	# 4. Check for Nexus Metadata
+	var loop_data = meta.get("nexus_animation_loops", {})
+	var marker_data = meta.get("nexus_animation_markers", {})
+	var root_motion_data = meta.get("nexus_animation_root_motion", {})
+	
+	if loop_data.is_empty() and marker_data.is_empty() and root_motion_data.is_empty():
+		return
+
+	# 5. Apply Settings
+	for anim_name in anim_list:
+		var anim: Animation = library.get_animation(anim_name)
+		
+		# A. Loop Modes
+		if loop_data.has(anim_name):
+			var loop_type = loop_data[anim_name]
+			match loop_type:
+				"LOOP": anim.loop_mode = Animation.LOOP_LINEAR
+				"PINGPONG": anim.loop_mode = Animation.LOOP_PINGPONG
+				"ONCE": anim.loop_mode = Animation.LOOP_NONE
+		
+		# B. Markers / Events
+		if marker_data.has(anim_name):
+			var markers = marker_data[anim_name]
+			var track_idx = -1
+			# Find or create method track
+			for i in range(anim.get_track_count()):
+				if anim.track_get_type(i) == Animation.TYPE_METHOD and anim.track_get_path(i) == NodePath("."):
+					track_idx = i
+					break
+			
+			if track_idx == -1:
+				track_idx = anim.add_track(Animation.TYPE_METHOD)
+				anim.track_set_path(track_idx, ".")
+			
+			# Clear old keys to prevent duplicates on reimport
+			while anim.track_get_key_count(track_idx) > 0:
+				anim.track_remove_key(track_idx, 0)
+				
+			for m in markers:
+				var key_data = {"method": "on_nexus_event", "args": [m["name"]]}
+				anim.track_insert_key(track_idx, m["time"], key_data)
+				
+		# C. Root Motion Flag
+		if root_motion_data.has(anim_name):
+			anim.set_meta("nexus_root_motion", true)
+
+func _find_animation_player(node: Node) -> AnimationPlayer:
+	if node is AnimationPlayer: return node
+	for child in node.get_children():
+		var res = _find_animation_player(child)
+		if res: return res
+	return null
+
+func _print_compact_summary(name: String, type: String, root: String, meta: Dictionary):
+	var group = meta.get("group_name", "")
+	var script = meta.get("script_path", "").get_file()
+	
+	var parts = []
+	if stats.paths > 0: parts.append("%d Mats" % stats.paths)
+	if stats.materials > 0: parts.append("%d Mats" % stats.materials)
+	if stats.collisions > 0: parts.append("%d Cols" % stats.collisions)
+	if stats.anims > 0: parts.append("%d Anims" % stats.anims)
+	if stats.lods > 0: parts.append("%d LODs" % stats.lods)
+	if stats.lights > 0: parts.append("%d Lights" % stats.lights)
+	if stats.cameras > 0: parts.append("%d Cameras" % stats.cameras)
+	if stats.instances > 0: parts.append("%d Inst" % stats.instances)
+	
+	var details = []
+	if not group.is_empty(): details.append("Grp: " + group)
+	if not script.is_empty(): details.append("Scr: " + script)
+	if not stats.physics.is_empty(): details.append("Phy: " + stats.physics)
+	if not stats.surface.is_empty(): details.append("Srf: " + stats.surface)
+	
+	var stat_str = ", ".join(parts) if parts else "No Geometry"
+	var detail_str = " | ".join(details)
+	
+	if detail_str.is_empty():
+		print_rich("[color=cyan]Nexus:[/color] %s (%s) -> [color=gray]%s[/color]" % [name, root, stat_str])
+	else:
+		print_rich("[color=cyan]Nexus:[/color] %s (%s) -> [color=gray]%s[/color] -> [color=green]%s[/color]" % [name, root, stat_str, detail_str])
+
+func _print_anim_lib_summary(name: String, anim_stats: Dictionary):
+	var added = anim_stats.get("added", 0)
+	var removed = anim_stats.get("removed", 0)
+	print_rich("[color=cyan]Nexus:[/color] %s (ANIM_LIB) -> [color=gray]%d Added, %d Removed[/color]" % [name, added, removed])

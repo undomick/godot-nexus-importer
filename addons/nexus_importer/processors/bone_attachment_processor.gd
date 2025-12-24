@@ -36,7 +36,6 @@ func process(node: Node3D, meta: Dictionary, root: Node) -> bool:
 	parent.add_child(bone_attachment)
 	bone_attachment.owner = root
 	
-	# CRITICAL: The original node is now moved to be a child of the BoneAttachment.
 	# It keeps its original local transform relative to the new parent.
 	parent.remove_child(node)
 	bone_attachment.add_child(node)
