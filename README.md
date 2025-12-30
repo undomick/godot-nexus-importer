@@ -6,7 +6,7 @@
 
 Tired of re-configuring your scenes in Godot after every re-import from Blender? Do you spend hours manually adding `CollisionShape3D` nodes, re-assigning materials, and attaching scripts to every single imported asset?
 
-The Nexus Importer puts an end to this repetitive process. By seamlessly integrating with the Godot engine, it acts as an intelligent post-processor that understands your assets exported from Blender and automatically configures them for in-game use. Design your assets in Blender—and let Nexus handle the rest.
+The Nexus Importer puts an end to this repetitive process. By seamlessly integrating with the Godot engine, it acts as an intelligent post-processor that understands your assets exported from Blender and automatically configures them for in-game use. Design your assets in Blender and let Nexus handle the rest.
 
 > ### ⚠️ Important Prerequisite!
 >
