@@ -36,7 +36,7 @@ func _exit_tree():
 	if fs.resources_reimported.is_connected(_on_resources_reimported):
 		fs.resources_reimported.disconnect(_on_resources_reimported)
 
-# --- THE WATCHDOG (PROCESS LOOP) ---
+# --- THE WATCHDOG ---
 
 func _process(_delta):
 	if _cooldown_timer > 0:
@@ -53,8 +53,7 @@ func _process(_delta):
 		var unique_files = _deduplicate_array(_reimport_queue)
 		_reimport_queue.clear()
 		
-		# --- SAFETY FIX: SELECTION HANDLING ---
-		# Deselect objects that are being reimported to prevent "frame_pre_draw" errors.
+		# --- SELECTION HANDLING ---
 		var selection = get_editor_interface().get_selection()
 		var selected_nodes = selection.get_selected_nodes()
 		var nodes_to_reselect = []
@@ -70,9 +69,8 @@ func _process(_delta):
 		
 		# Restore selection (as soon as possible)
 		if not nodes_to_reselect.is_empty():
-			# We use call_deferred so the reimport can finish first
 			call_deferred("_restore_selection", nodes_to_reselect)
-
+		
 		_cooldown_timer = SAFETY_FRAMES
 		return
 
@@ -127,6 +125,7 @@ func _on_resources_reimported(resources: PackedStringArray):
 # --- HELPER UTILS ---
 
 func _is_multimesh(gltf_path: String) -> bool:
+	# Fresh read of metadata
 	var meta = _get_nexus_metadata(gltf_path)
 	return meta.get("export_type") == "MULTIMESH_MANIFEST"
 

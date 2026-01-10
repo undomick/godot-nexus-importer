@@ -5,10 +5,7 @@ extends Object
 var _material_index: Dictionary = {}
 var _index_loaded: bool = false
 
-# Loads the material_index.json file once per import session to minimize disk I/O.
 func _load_material_index() -> bool:
-	# Force reload index every time to ensure we get latest paths from Blender
-	# Performance hit is negligible for single asset import.
 	var file = FileAccess.open('res://material_index.json', FileAccess.READ)
 	if not file:
 		_index_loaded = true
@@ -21,7 +18,6 @@ func _load_material_index() -> bool:
 	_index_loaded = true
 	return not _material_index.is_empty()
 
-# Main processing function called for every node.
 func process(node: Node, stats: Dictionary):
 	if not node is MeshInstance3D or not is_instance_valid(node.mesh): return
 	if not _load_material_index(): return
@@ -39,7 +35,8 @@ func process(node: Node, stats: Dictionary):
 				var mat_id = extras["nexus_material_id"]
 				if _material_index.has(mat_id):
 					var rel_path = _material_index[mat_id]["relative_path"]
-					var tres_path = "res://" + rel_path if not rel_path.begins_with("res://") else rel_path
+					
+					var tres_path = _ensure_res_path(rel_path)
 					
 					if ResourceLoader.exists(tres_path):
 						var external_material = ResourceLoader.load(tres_path, "", ResourceLoader.CACHE_MODE_REPLACE)
@@ -50,5 +47,9 @@ func process(node: Node, stats: Dictionary):
 							node.mesh.surface_set_material(i, external_material)
 							swapped_count += 1
 	
-	# Update Stats
 	stats.materials += swapped_count
+
+func _ensure_res_path(path: String) -> String:
+	if path.begins_with("res://"):
+		return path
+	return "res://" + path

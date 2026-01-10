@@ -1,8 +1,6 @@
 extends MultiMeshInstance3D
 
 # --- SETTINGS ---
-# Set to true to visualize the physics bodies (red wireframes).
-# Useful because PhysicsServer bodies are not shown by standard "Visible Collision Shapes".
 @export var debug_mode: bool = false
 
 # --- DATA FROM IMPORTER ---
