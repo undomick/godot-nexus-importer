@@ -1,6 +1,8 @@
 @tool
 extends Object
 
+## Applies nexus_camera metadata to Camera3D (perspective/orthographic, focal length, DOF).
+
 func process(node: Node, node_meta: Dictionary) -> bool:
 	if not node is Camera3D:
 		return false

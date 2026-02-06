@@ -1,7 +1,7 @@
-# file: addons/nexus_importer/processors/root_processor.gd
 @tool
 extends Object
 
+## Applies the script from metadata to the node if path is valid.
 func apply_script(node: Node, meta: Dictionary) -> bool:
 	var script_path = meta.get("script_path", "")
 	if not script_path.is_empty() and script_path.begins_with("res://"):
@@ -14,7 +14,7 @@ func apply_script(node: Node, meta: Dictionary) -> bool:
 			return false 
 	return false 
 
-# Sets physics properties (Layers, Masks, Material) and RigidBody settings
+## Sets physics properties (layers, masks, material) and RigidBody settings.
 func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary):
 	# Changed from PhysicsBody3D to CollisionObject3D to support Area3D as well
 	if not node is CollisionObject3D: return
@@ -24,7 +24,7 @@ func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary):
 		node.collision_layer = meta.get("collision_layer")
 		node.collision_mask = meta.get("collision_mask")
 	
-	# 2. Physics Material (Only for PhysicsBody3D, Area3D does not support override)
+	# 2. Physics Material (only for PhysicsBody3D; Area3D does not support override)
 	if node is PhysicsBody3D and meta.has("physics_material_path"):
 		var mat_path = meta["physics_material_path"]
 		if not mat_path.is_empty() and ResourceLoader.exists(mat_path):
@@ -64,3 +64,7 @@ func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary):
 				node.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 			else:
 				node.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+				
+	# AnimatableBody3D: sync_to_physics from manifest (default: false for keyframe-accurate animation)
+	if node is AnimatableBody3D:
+		node.sync_to_physics = meta.get("animatable_sync_to_physics", false)

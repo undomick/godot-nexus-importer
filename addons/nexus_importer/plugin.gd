@@ -1,13 +1,18 @@
 @tool
 extends EditorPlugin
 
+## Nexus Importer: Custom glTF importer for the Nexus Blender Export Pipeline.
+## Handles auto-reimport, wrapper creation, custom root types, and collision layers.
+
 var scene_post_processor = preload("res://addons/nexus_importer/scene_post_processor.gd").new()
 const SETTING_AUTO_IMPORT = "nexus/import/auto_assign_post_processor"
+const SETTING_ASSET_INDEX = "nexus/import/asset_index_path"
+const SETTING_MATERIAL_INDEX = "nexus/import/material_index_path"
 
 # --- STATUS & QUEUES ---
-var _reimport_queue: Array[String] = [] 
-var _wrapper_queue: Array[String] = []  
-var _scan_needed: bool = false               
+var _reimport_queue: Dictionary = {}  # path -> true (Set for O(1) lookup)
+var _wrapper_queue: Dictionary = {}  # path -> true (Set for O(1) lookup)
+var _scan_needed: bool = false
 
 # --- DEBOUNCING TIMER ---
 var _cooldown_timer: int = 0
@@ -19,9 +24,20 @@ func _enter_tree():
 	if not fs.resources_reimported.is_connected(_on_resources_reimported):
 		fs.resources_reimported.connect(_on_resources_reimported)
 	
+	var needs_save = false
 	if not ProjectSettings.has_setting(SETTING_AUTO_IMPORT):
 		ProjectSettings.set_setting(SETTING_AUTO_IMPORT, true)
 		ProjectSettings.set_initial_value(SETTING_AUTO_IMPORT, true)
+		needs_save = true
+	if not ProjectSettings.has_setting(SETTING_ASSET_INDEX):
+		ProjectSettings.set_setting(SETTING_ASSET_INDEX, "res://asset_index.json")
+		ProjectSettings.set_initial_value(SETTING_ASSET_INDEX, "res://asset_index.json")
+		needs_save = true
+	if not ProjectSettings.has_setting(SETTING_MATERIAL_INDEX):
+		ProjectSettings.set_setting(SETTING_MATERIAL_INDEX, "res://material_index.json")
+		ProjectSettings.set_initial_value(SETTING_MATERIAL_INDEX, "res://material_index.json")
+		needs_save = true
+	if needs_save:
 		ProjectSettings.save()
 	
 	_update_tool_menu_item()
@@ -50,7 +66,7 @@ func _process(_delta):
 
 	# PRIORITY A: Reimports
 	if not _reimport_queue.is_empty():
-		var unique_files = _deduplicate_array(_reimport_queue)
+		var unique_files = _reimport_queue.keys()
 		_reimport_queue.clear()
 		
 		# --- SELECTION HANDLING ---
@@ -74,11 +90,11 @@ func _process(_delta):
 		_cooldown_timer = SAFETY_FRAMES
 		return
 
-	# PRIORITY B: Wrapper Creation
+	# PRIORITY B: Wrapper Creation (one file per frame for editor responsiveness)
 	if not _wrapper_queue.is_empty():
-		var file_to_wrap = _wrapper_queue.pop_front()
+		var file_to_wrap = _wrapper_queue.keys()[0]
+		_wrapper_queue.erase(file_to_wrap)
 		_create_or_update_wrapper(file_to_wrap)
-		
 		if _wrapper_queue.is_empty():
 			_scan_needed = true
 		return
@@ -100,15 +116,15 @@ func _on_resources_reimported(resources: PackedStringArray):
 		if ext == "gltf":
 			# 1. Config Check
 			if _check_and_fix_import_config(path):
-				if not path in _reimport_queue:
-					_reimport_queue.append(path)
+				if not _reimport_queue.has(path):
+					_reimport_queue[path] = true
 				activity_detected = true
 			
 			else:
 				# 2. Wrapper Check
 				if _needs_wrapper_processing(path):
-					if not path in _wrapper_queue:
-						_wrapper_queue.append(path)
+					if not _wrapper_queue.has(path):
+						_wrapper_queue[path] = true
 					activity_detected = true
 				
 				# 3. MULTIMESH CHECK
@@ -124,23 +140,17 @@ func _on_resources_reimported(resources: PackedStringArray):
 
 # --- HELPER UTILS ---
 
+## Returns true if the glTF file is a MultiMesh manifest.
 func _is_multimesh(gltf_path: String) -> bool:
-	# Fresh read of metadata
-	var meta = _get_nexus_metadata(gltf_path)
+	var meta = NexusUtils.get_nexus_metadata(gltf_path)
 	return meta.get("export_type") == "MULTIMESH_MANIFEST"
-
-func _deduplicate_array(arr: Array) -> Array:
-	var unique = []
-	for item in arr:
-		if not item in unique: unique.append(item)
-	return unique
 
 # --- LOGIC STEPS ---
 
 func _check_and_fix_import_config(gltf_path: String) -> bool:
 	if not FileAccess.file_exists(gltf_path): return false
 	
-	var meta = _get_nexus_metadata(gltf_path)
+	var meta = NexusUtils.get_nexus_metadata(gltf_path)
 	if meta.is_empty(): return false
 	
 	var import_config_path = gltf_path + ".import"
@@ -185,7 +195,7 @@ func _check_and_fix_import_config(gltf_path: String) -> bool:
 	return false
 
 func _needs_wrapper_processing(gltf_path: String) -> bool:
-	var meta = _get_nexus_metadata(gltf_path)
+	var meta = NexusUtils.get_nexus_metadata(gltf_path)
 	if meta.is_empty(): return false
 	
 	var export_type = meta.get("export_type", "")
@@ -207,69 +217,86 @@ func _needs_wrapper_processing(gltf_path: String) -> bool:
 	return false
 
 func _create_or_update_wrapper(gltf_path: String):
-	var meta = _get_nexus_metadata(gltf_path)
+	var meta = NexusUtils.get_nexus_metadata(gltf_path)
 	var tscn_path = gltf_path.get_base_dir().path_join(gltf_path.get_file().get_basename() + ".tscn")
 	var target_script_path = meta.get("script_path", "")
 	
-	# 1. NEW CREATION
-	if not FileAccess.file_exists(tscn_path):
-		var gltf_resource = ResourceLoader.load(gltf_path)
-		if not gltf_resource: return
-		var packed_scene = PackedScene.new()
-		var root_node = Node3D.new()
-		root_node.name = gltf_path.get_file().get_basename()
-		var gltf_instance = gltf_resource.instantiate()
-		root_node.add_child(gltf_instance)
-		gltf_instance.owner = root_node
-		if not target_script_path.is_empty() and ResourceLoader.exists(target_script_path):
-			var script = ResourceLoader.load(target_script_path)
-			if script is Script:
-				gltf_instance.set_script(script)
-		if packed_scene.pack(root_node) == OK:
-			ResourceSaver.save(packed_scene, tscn_path)
-			print_rich("[color=cyan]Nexus Wrapper:[/color] Created '%s'." % tscn_path.get_file())
-		root_node.free()
+	# Load metadata (for Anim Lib path)
+	var gltf_resource = ResourceLoader.load(gltf_path)
+	if not gltf_resource:
+		push_error("Nexus Wrapper: Could not load GLTF: %s" % gltf_path)
+		return
+
+	# Briefly instantiate to read generated meta tags (e.g. path to Anim Lib)
+	var temp_instance = gltf_resource.instantiate()
+	var anim_lib_path = temp_instance.get_meta("nexus_anim_lib_path", "")
+	temp_instance.free()
+
+	var packed_scene = PackedScene.new()
+	
+	# --- 1. Root Node is ALWAYS Node3D (Container) ---
+	var root_node = Node3D.new()
+	# Wrapper name = filename
+	root_node.name = gltf_path.get_file().get_basename()
+
+	# --- 2. Add GLTF instance ---
+	var gltf_instance = gltf_resource.instantiate()
+	# IMPORTANT: Instance name must match exactly what AnimationProcessor expects (filename without extension).
+	var asset_name = gltf_path.get_file().get_basename()
+	gltf_instance.name = asset_name
+	
+	root_node.add_child(gltf_instance)
+	gltf_instance.owner = root_node
+	
+	# --- 3. Animation Player (Nexus script: on_nexus_event, get_nexus_markers) ---
+	if not anim_lib_path.is_empty() and ResourceLoader.exists(anim_lib_path):
+		var nexus_script = load("res://addons/nexus_importer/runtime/nexus_animation_player.gd")
+		var anim_player = AnimationPlayer.new()
+		anim_player.name = "AnimationPlayer"
+		if nexus_script:
+			anim_player.set_script(nexus_script)
+		root_node.add_child(anim_player)
+		anim_player.owner = root_node
 		
-	# 2. UPDATE EXISTING
-	else:
-		if target_script_path.is_empty(): return
-		var packed_scene = ResourceLoader.load(tscn_path)
-		if not packed_scene is PackedScene: return
-		var root = packed_scene.instantiate()
-		var gltf_instance = null
-		for child in root.get_children():
-			if child.scene_file_path == gltf_path:
-				gltf_instance = child
-				break
-		var needs_save = false
-		if gltf_instance:
-			var current_script = gltf_instance.get_script()
-			var new_script = ResourceLoader.load(target_script_path)
-			if current_script != new_script and new_script is Script:
-				gltf_instance.set_script(new_script)
-				needs_save = true
-		if needs_save:
-			if packed_scene.pack(root) == OK:
-				ResourceSaver.save(packed_scene, tscn_path)
-				print_rich("[color=cyan]Nexus Wrapper:[/color] Updated script on '%s'." % tscn_path.get_file())
-		root.free()
+		var library = ResourceLoader.load(anim_lib_path)
+		anim_player.add_animation_library("", library)
+		
+		# PhysicsBody: Callback mode for correct physics sync (including PhysicsBody in children)
+		if _has_physics_body_recursive(gltf_instance):
+			anim_player.callback_mode_process = AnimationPlayer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
+		
+		# Retargeting and Autoplay
+		var animation_processor = preload("res://addons/nexus_importer/processors/animation_processor.gd").new()
+		animation_processor.apply_scene_retargeting(root_node, anim_player)
+		
+		var anim_list = library.get_animation_list()
+		if anim_list.size() > 0:
+			anim_player.autoplay = anim_list[0]
+			anim_player.current_animation = anim_list[0]
+	
+	# --- 4. Script assignment ---
+	# Script goes on the container (Node3D), not on the GLTF child!
+	if not target_script_path.is_empty() and ResourceLoader.exists(target_script_path):
+		var script = ResourceLoader.load(target_script_path)
+		if script is Script:
+			root_node.set_script(script)
+
+	# --- 5. Save ---
+	if packed_scene.pack(root_node) == OK:
+		ResourceSaver.save(packed_scene, tscn_path)
+		print_rich("[color=cyan]Nexus Wrapper:[/color] Updated '%s' (Container Mode)." % tscn_path.get_file())
+	
+	root_node.free()
 
 # --- HELPER ---
 
-func _get_nexus_metadata(gltf_path: String) -> Dictionary:
-	if not FileAccess.file_exists(gltf_path): return {}
-	var file = FileAccess.open(gltf_path, FileAccess.READ)
-	if not file: return {}
-	var json = JSON.new()
-	if json.parse(file.get_as_text()) != OK: return {}
-	var gltf_data = json.get_data()
-	
-	var meta = gltf_data.get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-	if meta.is_empty():
-		meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-	if meta.is_empty():
-		meta = gltf_data.get("asset", {}).get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-	return meta
+func _has_physics_body_recursive(node: Node) -> bool:
+	if node is PhysicsBody3D:
+		return true
+	for child in node.get_children():
+		if _has_physics_body_recursive(child):
+			return true
+	return false
 
 func _has_custom_lods(gltf_path: String) -> bool:
 	var file = FileAccess.open(gltf_path, FileAccess.READ)

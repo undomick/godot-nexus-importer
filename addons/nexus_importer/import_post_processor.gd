@@ -1,6 +1,8 @@
 @tool
 extends EditorScenePostImport
 
+## Post-import processor for Nexus glTF assets. Converts nodes, materials, animations, LODs, etc.
+
 const NEXUS_ASSET_META = "NEXUS_ASSET_METADATA"
 const NEXUS_NODE_META = "NEXUS_NODE_METADATA"
 
@@ -66,7 +68,7 @@ func _post_import(scene: Node) -> Object:
 	}
 	
 	var gltf_path = get_source_file()
-	var scene_meta = _get_nexus_metadata_from_file(gltf_path)
+	var scene_meta = NexusUtils.get_nexus_metadata(gltf_path)
 	if scene_meta.is_empty(): return scene
 	
 	var export_type = scene_meta.get("export_type", "UNKNOWN")
@@ -74,6 +76,7 @@ func _post_import(scene: Node) -> Object:
 	
 	# --- EXPORT TYPE CHECKS ---
 	if export_type == "ANIMATION_LIB":
+		_apply_animation_settings(scene, scene_meta)
 		var anim_stats = animation_processor.process(scene, scene_meta)
 		_print_anim_lib_summary(scene.name, anim_stats)
 		return scene
@@ -87,12 +90,20 @@ func _post_import(scene: Node) -> Object:
 	
 	_process_node_recursively(scene, scene, scene_meta)
 	_process_materials_recursively(scene)
-	_apply_animation_settings(scene, scene_meta)
 	
+	# --- ANIMATION EXTRACTION (only here!) ---
+	# For assets or levels, extract animations.
+	if export_type in ["ASSET", "SKELETAL_ASSET", "LEVEL"]:
+		var anim_stats = animation_processor.extract_and_save_animations(scene, gltf_path, scene_meta)
+		stats.anims = anim_stats.extracted
+		
+		# Store path to extracted file in root meta so plugin.gd can read it when building the wrapper.
+		if anim_stats.extracted > 0:
+			scene.set_meta("nexus_anim_lib_path", anim_stats.path)
+
 	lod_processor.process(scene, stats)
 	
-	# --- FINAL SUMMARY LOG ---
-	_print_compact_summary(scene.name, export_type, root_type, scene_meta)
+	_print_compact_summary(scene.name, export_type, scene_meta.get("root_type", "Node3D"), scene_meta)
 	
 	return scene
 
@@ -135,41 +146,29 @@ func _process_materials_recursively(node: Node):
 	for child in node.get_children():
 		_process_materials_recursively(child)
 
-func _get_nexus_metadata_from_file(gltf_path: String) -> Dictionary:
-	if not FileAccess.file_exists(gltf_path): return {}
-	var file = FileAccess.open(gltf_path, FileAccess.READ)
-	if not file: return {}
-	
-	var json = JSON.new()
-	if json.parse(file.get_as_text()) != OK: return {}
-	var gltf_data = json.get_data()
-	
-	# 1. Check Root Extras
-	var meta = gltf_data.get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-	
-	# 2. Check Scene Extras
-	if meta.is_empty():
-		meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-	
-	# 3. Check Asset Extras
-	if meta.is_empty():
-		meta = gltf_data.get("asset", {}).get("extras", {}).get("NEXUS_ASSET_METADATA", {})
-		
-	return meta
-
 func _apply_animation_settings(scene: Node, meta: Dictionary):
 	# 1. Find Player (Always do this first)
 	var anim_player = _find_animation_player(scene)
 	if not anim_player: return
 
-	# 2. Get Library
+	# 2. Nexus script on AnimationPlayer (on_nexus_event, get_nexus_markers)
+	var nexus_script = load("res://addons/nexus_importer/runtime/nexus_animation_player.gd")
+	if nexus_script:
+		anim_player.set_script(nexus_script)
+
+	# 3. Get Library
 	var library = anim_player.get_animation_library("")
 	if not library: return
-
+	
+	if scene is PhysicsBody3D:
+		anim_player.callback_mode_process = AnimationPlayer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
+	
+	animation_processor.apply_scene_retargeting(scene, anim_player) 
+	
 	var anim_list = library.get_animation_list()
 	stats.anims = anim_list.size()
 	
-	# 3. Always set Autoplay & Current Animation for preview
+	# 3. Always set Autoplay and Current Animation for preview
 	# This ensures the animation is visible in the editor immediately.
 	if anim_list.size() > 0:
 		anim_player.autoplay = anim_list[0]
@@ -196,31 +195,31 @@ func _apply_animation_settings(scene: Node, meta: Dictionary):
 				"PINGPONG": anim.loop_mode = Animation.LOOP_PINGPONG
 				"ONCE": anim.loop_mode = Animation.LOOP_NONE
 		
-		# B. Markers / Events
+		# B. Method call tracks (visible) + metadata (get_nexus_markers)
 		if marker_data.has(anim_name):
 			var markers = marker_data[anim_name]
-			var track_idx = -1
-			# Find or create method track
-			for i in range(anim.get_track_count()):
-				if anim.track_get_type(i) == Animation.TYPE_METHOD and anim.track_get_path(i) == NodePath("."):
-					track_idx = i
-					break
-			
-			if track_idx == -1:
-				track_idx = anim.add_track(Animation.TYPE_METHOD)
-				anim.track_set_path(track_idx, ".")
-			
-			# Clear old keys to prevent duplicates on reimport
-			while anim.track_get_key_count(track_idx) > 0:
-				anim.track_remove_key(track_idx, 0)
-				
+			_remove_legacy_method_tracks(anim)
+			anim.set_meta("nexus_markers", markers)
+			var track_idx = anim.add_track(Animation.TYPE_METHOD)
+			anim.track_set_path(track_idx, NodePath(anim_player.name))
 			for m in markers:
-				var key_data = {"method": "on_nexus_event", "args": [m["name"]]}
-				anim.track_insert_key(track_idx, m["time"], key_data)
+				var marker_name = m.get("name", "") if m is Dictionary else str(m)
+				var marker_time = m.get("time", 0.0) if m is Dictionary else 0.0
+				var key_data = {"method": "on_nexus_event", "args": [marker_name]}
+				anim.track_insert_key(track_idx, marker_time, key_data)
 				
 		# C. Root Motion Flag
 		if root_motion_data.has(anim_name):
 			anim.set_meta("nexus_root_motion", true)
+
+func _remove_legacy_method_tracks(anim: Animation) -> void:
+	for i in range(anim.get_track_count() - 1, -1, -1):
+		if anim.track_get_type(i) == Animation.TYPE_METHOD:
+			for k in range(anim.track_get_key_count(i)):
+				var key_val = anim.track_get_key_value(i, k)
+				if key_val is Dictionary and key_val.get("method", "") == "on_nexus_event":
+					anim.remove_track(i)
+					break
 
 func _find_animation_player(node: Node) -> AnimationPlayer:
 	if node is AnimationPlayer: return node
@@ -234,7 +233,7 @@ func _print_compact_summary(name: String, type: String, root: String, meta: Dict
 	var script = meta.get("script_path", "").get_file()
 	
 	var parts = []
-	if stats.paths > 0: parts.append("%d Mats" % stats.paths)
+	if stats.paths > 0: parts.append("%d Paths" % stats.paths)
 	if stats.materials > 0: parts.append("%d Mats" % stats.materials)
 	if stats.collisions > 0: parts.append("%d Cols" % stats.collisions)
 	if stats.anims > 0: parts.append("%d Anims" % stats.anims)

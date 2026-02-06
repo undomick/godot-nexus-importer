@@ -1,6 +1,7 @@
-# file: addons/nexus_importer/processors/instancing_processor.gd
 @tool
 extends Object
+
+## Replaces placeholder nodes with instanced scenes from asset_index or nexus_placeholder_path.
 
 func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	var scene_path = ""
@@ -10,7 +11,8 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 		
 	elif meta.has("nexus_asset_id"):
 		var asset_id = meta["nexus_asset_id"]
-		var file = FileAccess.open('res://asset_index.json', FileAccess.READ)
+		var asset_index_path = ProjectSettings.get_setting("nexus/import/asset_index_path", "res://asset_index.json")
+		var file = FileAccess.open(asset_index_path, FileAccess.READ)
 		if file:
 			var json = JSON.new()
 			if json.parse(file.get_as_text()) == OK:
@@ -20,7 +22,7 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 					
 					var base_gltf_path = _ensure_res_path(rel)
 					
-					var editable_scene_path = base_gltf_path.get_slice(".", 0) + "_editable.tscn"
+					var editable_scene_path = base_gltf_path.get_basename() + "_editable.tscn"
 					scene_path = editable_scene_path if ResourceLoader.exists(editable_scene_path) else base_gltf_path
 				else:
 					push_error("Nexus Instancer: Asset ID '%s' not found." % asset_id)

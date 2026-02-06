@@ -1,10 +1,7 @@
-# file: addons/nexus_importer/processors/bone_attachment_processor.gd
 @tool
 extends Object
 
-# This function finds a placeholder, creates a BoneAttachment3D node,
-# and reparents the original node to be a child of the new attachment.
-# Returns 'true' if the node was reparented, 'false' otherwise.
+## Creates BoneAttachment3D and reparents the node to attach it to a skeleton bone.
 func process(node: Node3D, meta: Dictionary, root: Node) -> bool:
 	if not "nexus_bone_attachment" in meta:
 		return false

@@ -1,6 +1,8 @@
 @tool
 extends Object
 
+## Converts MULTIMESH_MANIFEST glTF to MultiMeshInstance3D with transforms and optional collisions.
+
 func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 	print("Nexus Processor: Processing as MultiMesh Manifest...")
 
@@ -15,11 +17,12 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 		return _create_error_node("Manifest Missing Data")
 
 	# 2. Load asset_index
-	if not FileAccess.file_exists('res://asset_index.json'):
-		push_error("Nexus MultiMesh: asset_index.json missing.")
+	var asset_index_path = ProjectSettings.get_setting("nexus/import/asset_index_path", "res://asset_index.json")
+	if not FileAccess.file_exists(asset_index_path):
+		push_error("Nexus MultiMesh: Asset index missing at '%s'." % asset_index_path)
 		return _create_error_node("Asset Index Missing")
 	
-	var index_file = FileAccess.open('res://asset_index.json', FileAccess.READ)
+	var index_file = FileAccess.open(asset_index_path, FileAccess.READ)
 	var json = JSON.new()
 	if json.parse(index_file.get_as_text()) != OK:
 		return _create_error_node("Index Corrupt")

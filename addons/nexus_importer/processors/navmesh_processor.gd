@@ -1,7 +1,7 @@
 @tool
 extends Object
 
-# This function is called for assets with the 'NAVMESH' root type.
+## Bakes NavigationMesh from mesh geometry for assets with NAVMESH root type.
 # It manually extracts mesh geometry to bypass SceneTree requirements during import.
 func process(scene_root: Node, scene_meta: Dictionary) -> void:
 	if scene_meta.get("root_type") != "NAVMESH":
@@ -44,7 +44,9 @@ func process(scene_root: Node, scene_meta: Dictionary) -> void:
 	print(" -> NavMesh bake completed.")
 
 	# 3. Cleanup: Remove the source meshes since the data is now baked into the navmesh.
-	_free_source_meshes_recursive(scene_root)
+	var meshes_to_free = _collect_mesh_instances(scene_root)
+	for mesh in meshes_to_free:
+		mesh.queue_free()
 
 
 # Recursively collects geometry from MeshInstance3D nodes.
@@ -73,12 +75,11 @@ func _find_first_mesh(node: Node) -> MeshInstance3D:
 		if res: return res
 	return null
 
-# Helper to remove source meshes after baking to prevent double geometry
-func _free_source_meshes_recursive(node: Node):
-	# We iterate backwards when removing children to be safe
-	for i in range(node.get_child_count() - 1, -1, -1):
-		var child = node.get_child(i)
-		_free_source_meshes_recursive(child)
-		
+## Recursively collects all MeshInstance3D nodes (before freeing to avoid recursion issues).
+func _collect_mesh_instances(node: Node) -> Array:
+	var result: Array = []
+	for child in node.get_children():
+		result.append_array(_collect_mesh_instances(child))
 	if node is MeshInstance3D:
-		node.queue_free()
+		result.append(node)
+	return result

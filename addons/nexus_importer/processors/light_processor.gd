@@ -1,6 +1,7 @@
-# file: addons/nexus_importer/processors/light_processor.gd
 @tool
 extends Object
+
+## Converts nexus_light metadata to OmniLight3D, SpotLight3D or DirectionalLight3D.
 
 func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	if not meta.has("nexus_light"): 

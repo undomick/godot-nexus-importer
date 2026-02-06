@@ -1,6 +1,8 @@
 @tool
 extends Object
 
+## Applies vertex color attributes (e.g. Albedo Tint) from nexus_color_attributes.
+
 func process(node: Node, meta: Dictionary) -> void:
 	if not node is MeshInstance3D or not is_instance_valid(node.mesh):
 		return
@@ -18,7 +20,7 @@ func process(node: Node, meta: Dictionary) -> void:
 		
 		if channel_index == -1: continue
 
-		# Shader Attribute Name for info output
+		# Shader attribute name for info output
 		var shader_attribute = "COLOR" if channel_index == 0 else "COLOR" + str(channel_index + 1)
 
 		match mapping:
@@ -31,8 +33,8 @@ func process(node: Node, meta: Dictionary) -> void:
 					_apply_albedo_tint(node)
 				else:
 					push_warning("Nexus: Layer '%s' is on %s. Albedo Tint only works on COLOR. Use custom shader." % [blender_name, shader_attribute])
-			
-			_: 
+
+			_:
 				print(" -> Layer '%s' mapped to %s for purpose '%s'." % [blender_name, shader_attribute, mapping])
 
 func _apply_albedo_tint(node: MeshInstance3D):

@@ -1,10 +1,12 @@
 extends MultiMeshInstance3D
 
-# --- SETTINGS ---
+## When enabled, shows red wireframe collision shapes at runtime for debugging.
 @export var debug_mode: bool = false
 
-# --- DATA FROM IMPORTER ---
+## Collision shapes from the source scene (assigned by MultiMesh processor).
 @export var collision_shapes: Array[Shape3D] = []
+
+## Local transforms for each collision shape (assigned by MultiMesh processor).
 @export var shape_transforms: Array[Transform3D] = []
 
 # Internal lists for cleanup

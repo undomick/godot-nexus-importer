@@ -1,9 +1,7 @@
 @tool
 extends Object
 
-# ==============================================================================
-# --- CONFIGURATION ------------------------------------------------------------
-# ==============================================================================
+## Applies LOD visibility ranges and shadow proxy linking from nexus metadata.
 
 const FADE_MODE = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 

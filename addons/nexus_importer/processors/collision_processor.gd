@@ -1,6 +1,8 @@
 @tool
 extends Object
 
+## Creates CollisionShape3D from nexus_collision_dims or nexus_mesh_collision_shape.
+
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: Node, stats: Dictionary) -> bool:
 	var has_collision_data = node_meta.has("nexus_collision_dims") or node_meta.has("nexus_mesh_collision_shape")
 	if not has_collision_data: return false
@@ -39,9 +41,9 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	var discard_mesh = node_meta.get("discard_mesh", false)
 	var should_replace = discard_mesh
 	if shape_type == "WORLDBOUNDARY" or not node is MeshInstance3D: should_replace = true
-	if node.get_class() == "Node3D" and node_meta.has("nexus_collision_dims") and not node_meta.has("nexus_mesh_collision_shape"): should_replace = true
+	if node.is_class("Node3D") and node_meta.has("nexus_collision_dims") and not node_meta.has("nexus_mesh_collision_shape"): should_replace = true
 
-	# STATS UPDATE STATT PRINT
+	# Stats update
 	stats.collisions += 1
 	
 	if should_replace:
@@ -75,7 +77,7 @@ func _create_shape_resource(node: Node, meta: Dictionary, offset: Vector3) -> Sh
 			"CAPSULE", "CYLINDER":
 				var shape = CapsuleShape3D.new() if col_data.get("shape") == "CAPSULE" else CylinderShape3D.new()
 				shape.radius = col_data.get("radius", 0.5)
-				# FIX: Height Assignment
+				# Height assignment
 				shape.height = col_data.get("height", 2.0)
 				shape_resource = shape
 			"WORLDBOUNDARY":

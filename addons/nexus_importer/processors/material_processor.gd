@@ -1,12 +1,14 @@
-# file: addons/nexus_importer/processors/material_processor.gd
 @tool
 extends Object
+
+## Swaps mesh materials based on nexus_material_id using material_index.json.
 
 var _material_index: Dictionary = {}
 var _index_loaded: bool = false
 
 func _load_material_index() -> bool:
-	var file = FileAccess.open('res://material_index.json', FileAccess.READ)
+	var path = ProjectSettings.get_setting("nexus/import/material_index_path", "res://material_index.json")
+	var file = FileAccess.open(path, FileAccess.READ)
 	if not file:
 		_index_loaded = true
 		return false

@@ -1,6 +1,8 @@
 @tool
 extends Object
 
+## Converts nexus_curve metadata to Path3D with Curve3D.
+
 func process(node: Node, node_meta: Dictionary, parent: Node) -> bool:
 	if not node_meta.has("nexus_curve"):
 		return false
@@ -46,7 +48,7 @@ func process(node: Node, node_meta: Dictionary, parent: Node) -> bool:
 		if p_start.distance_to(p_end) > 0.001:
 			add_curve_point.call(points_array[0])
 			
-		# Try to set the "Closed" property (compatibiliy check)
+		# Try to set the "Closed" property (compatibility check)
 		# Using set_deferred/set to avoid errors if the property doesn't exist.
 		if "closed" in curve:
 			curve.set("closed", true)
