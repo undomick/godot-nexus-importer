@@ -77,8 +77,10 @@ func _post_import(scene: Node) -> Object:
 	# --- EXPORT TYPE CHECKS ---
 	if export_type == "ANIMATION_LIB":
 		_apply_animation_settings(scene, scene_meta)
-		var anim_stats = animation_processor.process(scene, scene_meta)
-		_print_anim_lib_summary(scene.name, anim_stats)
+		# Extract and save AnimationLibrary .tres to target asset folder (target_animlib_path from manifest)
+		var anim_stats = animation_processor.extract_and_save_animations(scene, gltf_path, scene_meta)
+		stats.anims = anim_stats.extracted
+		_print_anim_lib_summary(scene.name, {"extracted": anim_stats.extracted, "path": anim_stats.path})
 		return scene
 		
 	if export_type == "MULTIMESH_MANIFEST":
@@ -88,6 +90,10 @@ func _post_import(scene: Node) -> Object:
 	root_processor.set_collision_layers(scene, scene_meta, stats)
 	navmesh_processor.process(scene, scene_meta)
 	
+	# Pass glTF path for bone attachment fallback (read raw node transform from file)
+	scene.set_meta("_nexus_gltf_path", gltf_path)
+	# Godot 4.4+ puts glTF extras in node meta; older versions may not – inject from glTF if missing
+	_inject_extras_from_gltf(scene, gltf_path)
 	_process_node_recursively(scene, scene, scene_meta)
 	_process_materials_recursively(scene)
 	
@@ -106,6 +112,40 @@ func _post_import(scene: Node) -> Object:
 	_print_compact_summary(scene.name, export_type, scene_meta.get("root_type", "Node3D"), scene_meta)
 	
 	return scene
+
+func _inject_extras_from_gltf(root: Node, gltf_path: String):
+	## Ensures node extras (NEXUS_NODE_METADATA) are available. Godot 4.4+ imports them to meta;
+	## older versions may not – in that case we read from glTF and inject manually.
+	if gltf_path.is_empty() or not gltf_path.ends_with(".gltf"):
+		return
+	var file = FileAccess.open(gltf_path, FileAccess.READ)
+	if not file: return
+	var json = JSON.new()
+	if json.parse(file.get_as_text()) != OK:
+		file.close()
+		return
+	file.close()
+	var gltf = json.get_data()
+	if gltf == null: return
+	var nodes = gltf.get("nodes", [])
+	var name_to_extras: Dictionary = {}
+	for n in nodes:
+		var extras = n.get("extras", {})
+		var node_meta = extras.get("NEXUS_NODE_METADATA")
+		if node_meta:
+			var nm = n.get("name", "")
+			if not nm.is_empty():
+				name_to_extras[nm] = extras
+	if name_to_extras.is_empty(): return
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var nd = stack.pop_back()
+		if nd.name in name_to_extras:
+			var existing = nd.get_meta("extras", {})
+			if not (existing is Dictionary) or not existing.has("NEXUS_NODE_METADATA"):
+				nd.set_meta("extras", name_to_extras[nd.name])
+		for i in range(nd.get_child_count() - 1, -1, -1):
+			stack.append(nd.get_child(i))
 
 func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
 	for i in range(node.get_child_count() - 1, -1, -1):
@@ -147,29 +187,25 @@ func _process_materials_recursively(node: Node):
 		_process_materials_recursively(child)
 
 func _apply_animation_settings(scene: Node, meta: Dictionary):
-	# 1. Find Player (Always do this first)
 	var anim_player = _find_animation_player(scene)
 	if not anim_player: return
 
-	# 2. Nexus script on AnimationPlayer (on_nexus_event, get_nexus_markers)
 	var nexus_script = load("res://addons/nexus_importer/runtime/nexus_animation_player.gd")
 	if nexus_script:
 		anim_player.set_script(nexus_script)
 
-	# 3. Get Library
 	var library = anim_player.get_animation_library("")
 	if not library: return
-	
+
 	if scene is PhysicsBody3D:
 		anim_player.callback_mode_process = AnimationPlayer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
-	
-	animation_processor.apply_scene_retargeting(scene, anim_player) 
-	
+
+	animation_processor.apply_scene_retargeting(scene, anim_player)
+
 	var anim_list = library.get_animation_list()
 	stats.anims = anim_list.size()
-	
-	# 3. Always set Autoplay and Current Animation for preview
-	# This ensures the animation is visible in the editor immediately.
+
+	# Autoplay and current animation for immediate editor preview
 	if anim_list.size() > 0:
 		anim_player.autoplay = anim_list[0]
 		anim_player.current_animation = anim_list[0] 
@@ -183,7 +219,6 @@ func _apply_animation_settings(scene: Node, meta: Dictionary):
 	if loop_data.is_empty() and marker_data.is_empty() and root_motion_data.is_empty():
 		return
 
-	# 5. Apply Settings
 	for anim_name in anim_list:
 		var anim: Animation = library.get_animation(anim_name)
 		
@@ -257,6 +292,9 @@ func _print_compact_summary(name: String, type: String, root: String, meta: Dict
 		print_rich("[color=cyan]Nexus:[/color] %s (%s) -> [color=gray]%s[/color] -> [color=green]%s[/color]" % [name, root, stat_str, detail_str])
 
 func _print_anim_lib_summary(name: String, anim_stats: Dictionary):
-	var added = anim_stats.get("added", 0)
-	var removed = anim_stats.get("removed", 0)
-	print_rich("[color=cyan]Nexus:[/color] %s (ANIM_LIB) -> [color=gray]%d Added, %d Removed[/color]" % [name, added, removed])
+	var extracted = anim_stats.get("extracted", 0)
+	var path = anim_stats.get("path", "")
+	if path.is_empty():
+		print_rich("[color=cyan]Nexus:[/color] %s (ANIM_LIB) -> [color=gray]%d animations extracted[/color]" % [name, extracted])
+	else:
+		print_rich("[color=cyan]Nexus:[/color] %s (ANIM_LIB) -> [color=gray]%d animations -> %s[/color]" % [name, extracted, path.get_file()])

@@ -22,12 +22,24 @@ func extract_and_save_animations(scene_root: Node, gltf_path: String, scene_meta
 	var library = internal_player.get_animation_library("")
 	if not library: return stats
 
-	var base_dir = gltf_path.get_base_dir()
-	var file_name = gltf_path.get_file().get_basename()
-	var save_path = base_dir.path_join(file_name + "_anims.res")
+	var save_path: String
+	var target_instance_name: String
 	
-	# Name of GLTF instance in wrapper (defined in plugin.gd)
-	var target_instance_name = file_name
+	# ANIMATION_LIB: Use target_animlib_path from manifest (saves to target asset folder)
+	var target_animlib_path = scene_meta.get("target_animlib_path", "")
+	if not target_animlib_path.is_empty():
+		save_path = target_animlib_path
+		target_instance_name = scene_meta.get("target_instance_name", "")
+		if target_instance_name.is_empty():
+			# Derive from path: "Character_animations.tres" -> "Character"
+			var stem = target_animlib_path.get_file().get_basename()
+			target_instance_name = stem.replace("_animations", "") if stem.ends_with("_animations") else stem
+	else:
+		# ASSET/SKELETAL_ASSET/LEVEL: Save next to glTF
+		var base_dir = gltf_path.get_base_dir()
+		var file_name = gltf_path.get_file().get_basename()
+		save_path = base_dir.path_join(file_name + "_anims.res")
+		target_instance_name = file_name
 
 	# 1. Find the name of the node marked as anchor
 	var anchor_node_name = _find_anchor_node_name(scene_root)
@@ -99,9 +111,15 @@ func extract_and_save_animations(scene_root: Node, gltf_path: String, scene_meta
 		stats.path = save_path
 		print("Nexus Animation: Extracted %d animations to '%s'" % [stats.extracted, save_path.get_file()])
 	
-	# Cleanup
-	internal_player.get_parent().remove_child(internal_player)
+	# Replace with empty placeholder to prevent "Node not found: AnimationPlayer" when toggling Editable Children
+	var parent = internal_player.get_parent()
+	var idx = internal_player.get_index()
+	parent.remove_child(internal_player)
 	internal_player.queue_free()
+	var placeholder = AnimationPlayer.new()
+	placeholder.name = "AnimationPlayer"
+	parent.add_child(placeholder)
+	parent.move_child(placeholder, idx)
 	
 	return stats
 

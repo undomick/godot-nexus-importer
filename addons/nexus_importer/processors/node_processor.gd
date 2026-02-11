@@ -9,9 +9,6 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary) -> void:
 	if node is GeometryInstance3D:
 		_process_shadow_casting(node, node_meta)
 		_process_gi_mode(node, node_meta, scene_meta)
-	
-	#if node_meta.get("nexus_is_anim_anchor", false):
-	#	node.transform = Transform3D.IDENTITY
 
 func _process_visibility(node: Node3D, meta: Dictionary):
 	if meta.has("visible"):

@@ -5,18 +5,24 @@ extends EditorPlugin
 ## Handles auto-reimport, wrapper creation, custom root types, and collision layers.
 
 var scene_post_processor = preload("res://addons/nexus_importer/scene_post_processor.gd").new()
+const RepathingTool = preload("res://addons/nexus_importer/repathing_tool.gd")
 const SETTING_AUTO_IMPORT = "nexus/import/auto_assign_post_processor"
 const SETTING_ASSET_INDEX = "nexus/import/asset_index_path"
 const SETTING_MATERIAL_INDEX = "nexus/import/material_index_path"
 
 # --- STATUS & QUEUES ---
-var _reimport_queue: Dictionary = {}  # path -> true (Set for O(1) lookup)
 var _wrapper_queue: Dictionary = {}  # path -> true (Set for O(1) lookup)
+var _config_deferred_queue: Array[String] = []
+var _reimport_queue: Array[String] = []
+var _reimport_pending: bool = false  # async reimport in progress - don't start another
 var _scan_needed: bool = false
 
-# --- DEBOUNCING TIMER ---
+# --- DEBOUNCING ---
 var _cooldown_timer: int = 0
 const SAFETY_FRAMES = 60
+
+## Never write .import during resources_reimported - triggers "Task 'reimport' already exists".
+## Use await process_frame before reimport_files - avoids progress_dialog errors (see Godot forum #123523).
 
 func _enter_tree():
 	add_scene_post_import_plugin(scene_post_processor)
@@ -41,12 +47,16 @@ func _enter_tree():
 		ProjectSettings.save()
 	
 	_update_tool_menu_item()
+	add_tool_menu_item("Nexus: Repathing-Tool", _run_repathing_tool)
+	add_tool_menu_item("Nexus: Export Animation Library", _run_export_animation_library)
 	print_rich("[color=green]Nexus Importer: Ready.[/color]")
 
 func _exit_tree():
 	remove_scene_post_import_plugin(scene_post_processor)
 	remove_tool_menu_item("Nexus: Import Mode (Auto)")
 	remove_tool_menu_item("Nexus: Import Mode (Manual)")
+	remove_tool_menu_item("Nexus: Repathing-Tool")
+	remove_tool_menu_item("Nexus: Export Animation Library")
 	
 	var fs = get_editor_interface().get_resource_filesystem()
 	if fs.resources_reimported.is_connected(_on_resources_reimported):
@@ -64,30 +74,11 @@ func _process(_delta):
 		_cooldown_timer = 10 
 		return
 
-	# PRIORITY A: Reimports
-	if not _reimport_queue.is_empty():
-		var unique_files = _reimport_queue.keys()
-		_reimport_queue.clear()
-		
-		# --- SELECTION HANDLING ---
-		var selection = get_editor_interface().get_selection()
-		var selected_nodes = selection.get_selected_nodes()
-		var nodes_to_reselect = []
-		
-		for node in selected_nodes:
-			# Check if the node belongs to the file we are reimporting
-			if node.scene_file_path in unique_files:
-				selection.remove_node(node)
-				nodes_to_reselect.append(node)
-		
-		# Execute reimport (while nothing is selected)
-		fs.reimport_files(unique_files)
-		
-		# Restore selection (as soon as possible)
-		if not nodes_to_reselect.is_empty():
-			call_deferred("_restore_selection", nodes_to_reselect)
-		
-		_cooldown_timer = SAFETY_FRAMES
+	# PRIORITY A: Auto Reimport (async - await process_frame to avoid progress_dialog errors)
+	if ProjectSettings.get_setting(SETTING_AUTO_IMPORT) and not _reimport_queue.is_empty() and not _reimport_pending:
+		var file_to_reimport = _reimport_queue.pop_front()
+		_reimport_pending = true
+		_reimport_safe_async(file_to_reimport)
 		return
 
 	# PRIORITY B: Wrapper Creation (one file per frame for editor responsiveness)
@@ -104,7 +95,31 @@ func _process(_delta):
 		_scan_needed = false
 		fs.scan()
 
-# --- EVENT HANDLER (DEBOUNCER) ---
+# --- ASYNC REIMPORT (avoid progress_dialog errors - see forum.godotengine.org/t/123523) ---
+
+func _reimport_safe_async(file_path: String):
+	# Await 4 frames - ensures we're NOT in signal/deferred context (forum #123523, GitHub #100900)
+	# progress_dialog fails when called during message queue flush
+	for i in 4:
+		await get_tree().process_frame
+	var fs = get_editor_interface().get_resource_filesystem()
+	if fs.is_scanning():
+		_reimport_queue.push_front(file_path)
+		_reimport_pending = false
+		return
+	var selection = get_editor_interface().get_selection()
+	var nodes_to_reselect = []
+	for node in selection.get_selected_nodes():
+		if node.scene_file_path == file_path:
+			selection.remove_node(node)
+			nodes_to_reselect.append(node)
+	fs.reimport_files(PackedStringArray([file_path]))
+	if not nodes_to_reselect.is_empty():
+		call_deferred("_restore_selection", nodes_to_reselect)
+	_cooldown_timer = SAFETY_FRAMES
+	_reimport_pending = false
+
+# --- EVENT HANDLER ---
 
 func _on_resources_reimported(resources: PackedStringArray):
 	var is_auto_mode = ProjectSettings.get_setting(SETTING_AUTO_IMPORT)
@@ -114,20 +129,18 @@ func _on_resources_reimported(resources: PackedStringArray):
 	for path in resources:
 		var ext = path.get_extension().to_lower()
 		if ext == "gltf":
-			# 1. Config Check
-			if _check_and_fix_import_config(path):
-				if not _reimport_queue.has(path):
-					_reimport_queue[path] = true
+			# 1. Config Check - defer .import write to avoid "Task 'reimport' already exists"
+			if _check_and_fix_import_config(path, false):
+				if not path in _config_deferred_queue:
+					_config_deferred_queue.append(path)
+				call_deferred("_apply_deferred_config_writes")
 				activity_detected = true
-			
 			else:
 				# 2. Wrapper Check
 				if _needs_wrapper_processing(path):
 					if not _wrapper_queue.has(path):
 						_wrapper_queue[path] = true
 					activity_detected = true
-				
-				# 3. MULTIMESH CHECK
 				elif _is_multimesh(path):
 					_scan_needed = true
 					activity_detected = true
@@ -147,7 +160,7 @@ func _is_multimesh(gltf_path: String) -> bool:
 
 # --- LOGIC STEPS ---
 
-func _check_and_fix_import_config(gltf_path: String) -> bool:
+func _check_and_fix_import_config(gltf_path: String, do_write: bool = true) -> bool:
 	if not FileAccess.file_exists(gltf_path): return false
 	
 	var meta = NexusUtils.get_nexus_metadata(gltf_path)
@@ -188,11 +201,28 @@ func _check_and_fix_import_config(gltf_path: String) -> bool:
 			changes_made = true
 	
 	if changes_made:
-		import_config.save(import_config_path)
-		get_editor_interface().get_resource_filesystem().update_file(import_config_path)
+		if do_write:
+			import_config.save(import_config_path)
 		return true
 	
 	return false
+
+func _apply_deferred_config_writes():
+	## Write .import files deferred - avoids "Task 'reimport' already exists" when
+	## file watcher triggers reimport while Godot's reimport task is still active.
+	if _config_deferred_queue.is_empty(): return
+	var fs = get_editor_interface().get_resource_filesystem()
+	if fs.is_scanning():
+		call_deferred("_apply_deferred_config_writes")
+		return
+	var paths = _config_deferred_queue.duplicate()
+	_config_deferred_queue.clear()
+	var is_auto = ProjectSettings.get_setting(SETTING_AUTO_IMPORT)
+	for path in paths:
+		_check_and_fix_import_config(path, true)
+		if is_auto and not path in _reimport_queue:
+			_reimport_queue.append(path)
+		print_rich("[color=yellow]Nexus:[/color] Config updated for %s." % path.get_file())
 
 func _needs_wrapper_processing(gltf_path: String) -> bool:
 	var meta = NexusUtils.get_nexus_metadata(gltf_path)
@@ -248,8 +278,11 @@ func _create_or_update_wrapper(gltf_path: String):
 	root_node.add_child(gltf_instance)
 	gltf_instance.owner = root_node
 	
-	# --- 3. Animation Player (Nexus script: on_nexus_event, get_nexus_markers) ---
-	if not anim_lib_path.is_empty() and ResourceLoader.exists(anim_lib_path):
+	# --- 3. Animation Player (always for SKELETAL_ASSET - prevents "Node not found: AnimationPlayer") ---
+	var export_type = meta.get("export_type", "")
+	var is_skeletal = export_type == "SKELETAL_ASSET"
+	var needs_anim_player = is_skeletal or (not anim_lib_path.is_empty() and ResourceLoader.exists(anim_lib_path))
+	if needs_anim_player:
 		var nexus_script = load("res://addons/nexus_importer/runtime/nexus_animation_player.gd")
 		var anim_player = AnimationPlayer.new()
 		anim_player.name = "AnimationPlayer"
@@ -258,21 +291,22 @@ func _create_or_update_wrapper(gltf_path: String):
 		root_node.add_child(anim_player)
 		anim_player.owner = root_node
 		
-		var library = ResourceLoader.load(anim_lib_path)
-		anim_player.add_animation_library("", library)
-		
-		# PhysicsBody: Callback mode for correct physics sync (including PhysicsBody in children)
-		if _has_physics_body_recursive(gltf_instance):
-			anim_player.callback_mode_process = AnimationPlayer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
-		
-		# Retargeting and Autoplay
-		var animation_processor = preload("res://addons/nexus_importer/processors/animation_processor.gd").new()
-		animation_processor.apply_scene_retargeting(root_node, anim_player)
-		
-		var anim_list = library.get_animation_list()
-		if anim_list.size() > 0:
-			anim_player.autoplay = anim_list[0]
-			anim_player.current_animation = anim_list[0]
+		if not anim_lib_path.is_empty() and ResourceLoader.exists(anim_lib_path):
+			var library = ResourceLoader.load(anim_lib_path)
+			anim_player.add_animation_library("", library)
+			
+			# PhysicsBody: Callback mode for correct physics sync (including PhysicsBody in children)
+			if _has_physics_body_recursive(gltf_instance):
+				anim_player.callback_mode_process = AnimationPlayer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
+			
+			# Retargeting and Autoplay
+			var animation_processor = preload("res://addons/nexus_importer/processors/animation_processor.gd").new()
+			animation_processor.apply_scene_retargeting(root_node, anim_player)
+			
+			var anim_list = library.get_animation_list()
+			if anim_list.size() > 0:
+				anim_player.autoplay = anim_list[0]
+				anim_player.current_animation = anim_list[0]
 	
 	# --- 4. Script assignment ---
 	# Script goes on the container (Node3D), not on the GLTF child!
@@ -312,6 +346,24 @@ func _get_root_type_string(nexus_type: String) -> String:
 	}
 	return map.get(nexus_type, "Node3D")
 
+func _run_repathing_tool():
+	var result = RepathingTool.run(get_editor_interface())
+	var ok = result.get("ok", false)
+	var msg = result.get("message", "")
+	var color = "green" if ok else "yellow"
+	print_rich("[color=%s]Nexus Repathing:[/color] %s" % [color, msg])
+	if not ok:
+		push_warning(msg)
+
+func _run_export_animation_library():
+	var result = RepathingTool.export_animation_library(get_editor_interface())
+	var ok = result.get("ok", false)
+	var msg = result.get("message", "")
+	var color = "green" if ok else "yellow"
+	print_rich("[color=%s]Nexus Export:[/color] %s" % [color, msg])
+	if not ok:
+		push_warning(msg)
+
 func _toggle_import_mode():
 	var current = ProjectSettings.get_setting(SETTING_AUTO_IMPORT)
 	ProjectSettings.set_setting(SETTING_AUTO_IMPORT, not current)
@@ -324,7 +376,7 @@ func _update_tool_menu_item():
 	var is_auto = ProjectSettings.get_setting(SETTING_AUTO_IMPORT)
 	add_tool_menu_item("Nexus: Import Mode (Auto)" if is_auto else "Nexus: Import Mode (Manual)", _toggle_import_mode)
 
-func _restore_selection(nodes: Array):
+func _restore_selection(nodes: Array[Node]):
 	var selection = get_editor_interface().get_selection()
 	for node in nodes:
 		if is_instance_valid(node):

@@ -37,11 +37,13 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 		col_shape_node.set_meta("surface", final_tag)
 
 	# --- REPLACE LOGIC ---
+	# Replace = remove mesh, keep only CollisionShape3D.
+	# MeshInstance3D: only replace when discard_mesh is set (user wants collision-only).
+	# Non-mesh nodes (Empty) or WORLDBOUNDARY: always replace.
 	var shape_type = col_data.get("shape", "")
 	var discard_mesh = node_meta.get("discard_mesh", false)
 	var should_replace = discard_mesh
 	if shape_type == "WORLDBOUNDARY" or not node is MeshInstance3D: should_replace = true
-	if node.is_class("Node3D") and node_meta.has("nexus_collision_dims") and not node_meta.has("nexus_mesh_collision_shape"): should_replace = true
 
 	# Stats update
 	stats.collisions += 1
