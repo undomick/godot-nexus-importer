@@ -1,5 +1,5 @@
 # Nexus Importer for Godot
-[![Discord](https://img.shields.io/discord/1446024019341086864?label=Discord&logo=discord&style=flat-square&color=5865F2)](https://discord.gg/HMxbzqWCgQ)
+[![Discord](https://img.shields.io/discord/1446024019341086864?label=Discord&logo=discord&style=flat-square&color=5865F2)](https://discord.gg/VTSpAEHHhW)
 [![Ko-fi](https://img.shields.io/badge/Support%20me-Ko--fi-F16061?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/jundrie)
 
 **The intelligent link for your Blender-Godot pipeline. Turn your Blender exports into game-ready Godot assets, automatically.**
@@ -54,4 +54,4 @@ That's it! The importer is now active and will automatically process any `.gltf`
 
 Join the Discord server to ask questions, suggest features, or show off your projects made with this addon!
 
-<a href="https://discord.gg/HMxbzqWCgQ"><img src="https://img.shields.io/badge/Join-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join Discord"></a> <a href="https://ko-fi.com/jundrie"><img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support me on Ko-fi"></a>
+<a href="https://discord.gg/VTSpAEHHhW"><img src="https://img.shields.io/badge/Join-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join Discord"></a> <a href="https://ko-fi.com/jundrie"><img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support me on Ko-fi"></a>
