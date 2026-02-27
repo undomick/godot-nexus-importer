@@ -4,6 +4,10 @@ extends Object
 ## Creates CollisionShape3D from nexus_collision_dims or nexus_mesh_collision_shape.
 
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: Node, stats: Dictionary) -> bool:
+	var shape_type = node_meta.get("nexus_mesh_collision_shape", "")
+	if shape_type in ["RESONANCE_STATIC", "RESONANCE_DYNAMIC"]:
+		return false  # Handled by ResonanceProcessor
+
 	var has_collision_data = node_meta.has("nexus_collision_dims") or node_meta.has("nexus_mesh_collision_shape")
 	if not has_collision_data: return false
 
@@ -40,10 +44,10 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	# Replace = remove mesh, keep only CollisionShape3D.
 	# MeshInstance3D: only replace when discard_mesh is set (user wants collision-only).
 	# Non-mesh nodes (Empty) or WORLDBOUNDARY: always replace.
-	var shape_type = col_data.get("shape", "")
+	var col_shape = col_data.get("shape", "")
 	var discard_mesh = node_meta.get("discard_mesh", false)
 	var should_replace = discard_mesh
-	if shape_type == "WORLDBOUNDARY" or not node is MeshInstance3D: should_replace = true
+	if col_shape == "WORLDBOUNDARY" or not node is MeshInstance3D: should_replace = true
 
 	# Stats update
 	stats.collisions += 1

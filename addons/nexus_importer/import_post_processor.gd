@@ -9,6 +9,7 @@ const NEXUS_NODE_META = "NEXUS_NODE_METADATA"
 const AnimationProcessor = preload("res://addons/nexus_importer/processors/animation_processor.gd")
 const BoneAttachmentProcessor = preload("res://addons/nexus_importer/processors/bone_attachment_processor.gd")
 const CollisionProcessor = preload("res://addons/nexus_importer/processors/collision_processor.gd")
+const ResonanceProcessor = preload("res://addons/nexus_importer/processors/resonance_processor.gd")
 const InstancingProcessor = preload("res://addons/nexus_importer/processors/instancing_processor.gd")
 const LightProcessor = preload("res://addons/nexus_importer/processors/light_processor.gd")
 const LodProcessor = preload("res://addons/nexus_importer/processors/lod_processor.gd")
@@ -24,6 +25,7 @@ const PathProcessor = preload("res://addons/nexus_importer/processors/path_proce
 var animation_processor = AnimationProcessor.new()
 var bone_attachment_processor = BoneAttachmentProcessor.new()
 var collision_processor = CollisionProcessor.new()
+var resonance_processor = ResonanceProcessor.new()
 var instancing_processor = InstancingProcessor.new()
 var light_processor = LightProcessor.new()
 var lod_processor = LodProcessor.new()
@@ -41,6 +43,7 @@ var stats = {
 	"paths": 0,
 	"materials": 0,
 	"collisions": 0,
+	"resonance": 0,
 	"lods": 0,
 	"scripts": 0,
 	"instances": 0,
@@ -57,6 +60,7 @@ func _post_import(scene: Node) -> Object:
 		"paths": 0,
 		"materials": 0,
 		"collisions": 0,
+		"resonance": 0,
 		"lods": 0,
 		"scripts": 0,
 		"instances": 0,
@@ -172,11 +176,15 @@ func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
 		stats.cameras += 1
 		pass
 	if bone_attachment_processor.process(node, node_meta, root): return
-	
-	# Pass Stats to Collision Processor!
-	if collision_processor.process(node, node_meta, scene_meta, root, stats): 
+
+	# Resonance Geometry (must run before Collision Processor)
+	if resonance_processor.process(node, node_meta, scene_meta, root, stats):
 		return
-	
+
+	# Pass Stats to Collision Processor!
+	if collision_processor.process(node, node_meta, scene_meta, root, stats):
+		return
+
 	vertex_color_processor.process(node, node_meta)
 	node_processor.process(node, node_meta, scene_meta)
 
@@ -271,6 +279,7 @@ func _print_compact_summary(name: String, type: String, root: String, meta: Dict
 	if stats.paths > 0: parts.append("%d Paths" % stats.paths)
 	if stats.materials > 0: parts.append("%d Mats" % stats.materials)
 	if stats.collisions > 0: parts.append("%d Cols" % stats.collisions)
+	if stats.get("resonance", 0) > 0: parts.append("%d Resonance" % stats.resonance)
 	if stats.anims > 0: parts.append("%d Anims" % stats.anims)
 	if stats.lods > 0: parts.append("%d LODs" % stats.lods)
 	if stats.lights > 0: parts.append("%d Lights" % stats.lights)
