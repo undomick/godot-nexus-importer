@@ -4,7 +4,7 @@ extends Object
 ## Converts MULTIMESH_MANIFEST glTF to MultiMeshInstance3D with transforms and optional collisions.
 
 func process(gltf_path: String, scene_meta: Dictionary) -> Node:
-	print("Nexus Processor: Processing as MultiMesh Manifest...")
+	print_verbose("Nexus Processor: Processing as MultiMesh Manifest...")
 
 	# 1. Read metadata
 	var source_asset_id = scene_meta.get("source_asset_id")
@@ -32,9 +32,17 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 		push_error("Nexus MultiMesh: Source Asset ID '%s' not found." % source_asset_id)
 		return _create_error_node("Source Asset ID Not Found")
 
+	var entry = asset_index[source_asset_id]
+	if not entry is Dictionary:
+		push_error("Nexus MultiMesh: Invalid index entry for Asset ID '%s'." % source_asset_id)
+		return _create_error_node("Index Entry Invalid")
+
 	# 3. Find Source Paths
-	var rel_path = asset_index[source_asset_id]["relative_path"]
-	var base_gltf_path = _ensure_res_path(rel_path) 
+	var rel_path = entry.get("relative_path", "")
+	var base_gltf_path = NexusUtils.validate_index_path(rel_path)
+	if base_gltf_path.is_empty():
+		push_error("Nexus MultiMesh: Invalid path in index for Asset ID '%s'." % source_asset_id)
+		return _create_error_node("Invalid Path") 
 	
 	var base_no_ext = base_gltf_path.get_basename()
 	var editable_scene_path = base_no_ext + "_editable.tscn"
@@ -66,16 +74,12 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 		
 	var source_mesh: Mesh = source_mesh_instance.mesh
 	
-	# 4. Handle Resource
+	# 4. Handle Resource - always create fresh to avoid Godot bug #95617/#106950:
+	# loading .multimesh.res can deserialize properties in wrong order, triggering
+	# "Instance count must be 0 to change..." errors. We overwrite the file anyway.
 	var res_filename = gltf_path.get_file().get_basename() + ".multimesh.res"
 	var res_path = gltf_path.get_base_dir().path_join(res_filename)
-	
-	var multimesh_res: MultiMesh = null
-	if ResourceLoader.exists(res_path):
-		multimesh_res = ResourceLoader.load(res_path)
-	
-	if not multimesh_res:
-		multimesh_res = MultiMesh.new()
+	var multimesh_res := MultiMesh.new()
 
 	# --- CONFIGURATION ---
 	multimesh_res.instance_count = 0 
@@ -114,17 +118,19 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 		temp_instance.free()
 		return _create_error_node("Res Save Failed")
 
-	# FORCE RELOAD to ensure node gets the file reference, not memory reference
-	var linked_res = ResourceLoader.load(res_path, "MultiMesh", ResourceLoader.CACHE_MODE_REPLACE)
+	# Use in-memory resource directly. Skipping ResourceLoader.load() avoids Godot bug #95617/#106950:
+	# loading .multimesh.res can deserialize instance_count before transform_format/use_colors/use_custom_data,
+	# triggering "Instance count must be 0 to change..." errors. Our multimesh_res is already configured correctly.
+	# ResourceSaver.save() sets resource_path, so the node will reference the file for persistence.
 
 	# 5. Create Node
 	var mmi_node = MultiMeshInstance3D.new()
 	mmi_node.name = gltf_path.get_file().get_basename()
-	mmi_node.multimesh = linked_res
+	mmi_node.multimesh = multimesh_res
 
 	# Collision Handling
 	if generate_col:
-		print("Nexus MultiMesh: Searching for collision shapes in '%s'..." % source_scene_path)
+		print_verbose("Nexus MultiMesh: Searching for collision shapes in '%s'..." % source_scene_path)
 		var found_shapes: Array[Shape3D] = []
 		var found_transforms: Array[Transform3D] = []
 		
@@ -146,15 +152,15 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 				mmi_node.set_script(script)
 				mmi_node.collision_shapes = found_shapes
 				mmi_node.shape_transforms = found_transforms
-				print(" -> SUCCESS: Attached runtime script with %d shapes." % found_shapes.size())
+				print_verbose(" -> SUCCESS: Attached runtime script with %d shapes." % found_shapes.size())
 
 	temp_instance.free()
 
-	var count = linked_res.instance_count
+	var count = multimesh_res.instance_count
 	var col_info = "YES" if (mmi_node.get_script() != null) else "NO"
 	var asset_name = mmi_node.name.replace("Collection_", "") 
 	
-	print_rich("[color=cyan]Nexus:[/color] %s (MULTIMESH) -> [color=gray]%d Instances[/color] -> [color=green]Cols: %s[/color]" % [asset_name, count, col_info])
+	print_verbose("Nexus: %s (MULTIMESH) -> %d Instances -> Cols: %s" % [asset_name, count, col_info])
 	
 	return mmi_node
 
@@ -167,10 +173,6 @@ func _find_node_of_type(root: Node, class_type: StringName) -> Node:
 		for child in current.get_children():
 			queue.push_back(child)
 	return null
-
-func _ensure_res_path(path: String) -> String:
-	if path.begins_with("res://"): return path
-	return "res://" + path
 
 # --- ERROR VISUALIZER ---
 func _create_error_node(reason: String) -> Node3D:

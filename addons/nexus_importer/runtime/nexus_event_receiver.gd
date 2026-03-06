@@ -1,9 +1,10 @@
 extends Node
 
 ## Stub receiver for Nexus animation markers/events.
-## Animation method call tracks target this node to avoid "Method not found" errors
-## when the root Node3D has no on_nexus_event.
-## Connect to nexus_event in the root script to react to markers.
+## Assign this script to a CHILD node (e.g. "NexusEvents") when animation method call tracks
+## target that node path instead of "." (root). Use this when the root has a custom script
+## that doesn't implement on_nexus_event. Connect to nexus_event to react to markers.
+## Use nexus_event_root.gd when tracks use path "." on the scene root.
 
 signal nexus_event(marker_name: String)
 

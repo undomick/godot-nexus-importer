@@ -44,7 +44,7 @@ func extract_and_save_animations(scene_root: Node, gltf_path: String, scene_meta
 	# 1. Find the name of the node marked as anchor
 	var anchor_node_name = _find_anchor_node_name(scene_root)
 	if anchor_node_name != "":
-		print("Nexus Animation: Detected Root Motion Anchor on node '%s'" % anchor_node_name)
+		print_verbose("Nexus Animation: Detected Root Motion Anchor on node '%s'" % anchor_node_name)
 	
 	# Smart Merge Setup
 	var existing_lib: AnimationLibrary = null
@@ -65,16 +65,7 @@ func extract_and_save_animations(scene_root: Node, gltf_path: String, scene_meta
 			final_anim = existing_lib.get_animation(anim_name)
 			_update_transform_tracks(final_anim, source_anim, target_instance_name, anchor_node_name)
 			if marker_data.has(anim_name):
-				var markers = marker_data[anim_name]
-				_remove_legacy_method_tracks(final_anim)
-				final_anim.set_meta("nexus_markers", markers)
-				var track_idx = final_anim.add_track(Animation.TYPE_METHOD)
-				final_anim.track_set_path(track_idx, NodePath(NEXUS_ANIM_PLAYER_PATH))
-				for m in markers:
-					var marker_name = m.get("name", "") if m is Dictionary else str(m)
-					var marker_time = m.get("time", 0.0) if m is Dictionary else 0.0
-					var key_data = {"method": "on_nexus_event", "args": [marker_name]}
-					final_anim.track_insert_key(track_idx, marker_time, key_data)
+				add_marker_tracks(final_anim, marker_data[anim_name])
 		else:
 			final_anim = source_anim.duplicate()
 			_repath_tracks(final_anim, target_instance_name, anchor_node_name)
@@ -92,16 +83,7 @@ func extract_and_save_animations(scene_root: Node, gltf_path: String, scene_meta
 		
 		# Method call tracks (visible in editor) + metadata (get_nexus_markers())
 		if marker_data.has(anim_name):
-			var markers = marker_data[anim_name]
-			_remove_legacy_method_tracks(final_anim)
-			final_anim.set_meta("nexus_markers", markers)
-			var track_idx = final_anim.add_track(Animation.TYPE_METHOD)
-			final_anim.track_set_path(track_idx, NodePath(NEXUS_ANIM_PLAYER_PATH))
-			for m in markers:
-				var marker_name = m.get("name", "") if m is Dictionary else str(m)
-				var marker_time = m.get("time", 0.0) if m is Dictionary else 0.0
-				var key_data = {"method": "on_nexus_event", "args": [marker_name]}
-				final_anim.track_insert_key(track_idx, marker_time, key_data)
+			add_marker_tracks(final_anim, marker_data[anim_name])
 
 		new_lib.add_animation(anim_name, final_anim)
 		stats.extracted += 1
@@ -109,7 +91,7 @@ func extract_and_save_animations(scene_root: Node, gltf_path: String, scene_meta
 	var err = ResourceSaver.save(new_lib, save_path)
 	if err == OK:
 		stats.path = save_path
-		print("Nexus Animation: Extracted %d animations to '%s'" % [stats.extracted, save_path.get_file()])
+		print_verbose("Nexus Animation: Extracted %d animations to '%s'" % [stats.extracted, save_path.get_file()])
 	
 	# Replace with empty placeholder to prevent "Node not found: AnimationPlayer" when toggling Editable Children
 	var parent = internal_player.get_parent()
@@ -131,6 +113,20 @@ func _find_animation_player(node: Node) -> AnimationPlayer:
 		var res = _find_animation_player(child)
 		if res: return res
 	return null
+
+## Public: Adds method call tracks and nexus_markers metadata for animation events.
+## track_path: when empty, uses NEXUS_ANIM_PLAYER_PATH ("AnimationPlayer").
+func add_marker_tracks(anim: Animation, markers: Array, track_path: NodePath = NodePath()) -> void:
+	_remove_legacy_method_tracks(anim)
+	anim.set_meta("nexus_markers", markers)
+	var track_idx = anim.add_track(Animation.TYPE_METHOD)
+	var path_to_use = track_path if not track_path.is_empty() else NodePath(NEXUS_ANIM_PLAYER_PATH)
+	anim.track_set_path(track_idx, path_to_use)
+	for m in markers:
+		var marker_name = m.get("name", "") if m is Dictionary else str(m)
+		var marker_time = m.get("time", 0.0) if m is Dictionary else 0.0
+		var key_data = {"method": "on_nexus_event", "args": [marker_name]}
+		anim.track_insert_key(track_idx, marker_time, key_data)
 
 ## Removes legacy on_nexus_event method tracks (replaced by nexus_markers metadata).
 func _remove_legacy_method_tracks(anim: Animation) -> void:
@@ -177,14 +173,14 @@ func _calculate_new_path(old_path: NodePath, instance_name: String, anchor_name:
 		return NodePath(instance_name + "/" + path_str)
 
 ## For NEW animations.
-func _repath_tracks(anim: Animation, instance_name: String, anchor_name: String):
+func _repath_tracks(anim: Animation, instance_name: String, anchor_name: String) -> void:
 	_remove_legacy_method_tracks(anim)
 	for i in range(anim.get_track_count()):
 		var old_path = anim.track_get_path(i)
 		anim.track_set_path(i, _calculate_new_path(old_path, instance_name, anchor_name))
 
 ## For SMART UPDATE (existing animations).
-func _update_transform_tracks(target: Animation, source: Animation, instance_name: String, anchor_name: String):
+func _update_transform_tracks(target: Animation, source: Animation, instance_name: String, anchor_name: String) -> void:
 	_remove_legacy_method_tracks(target)
 	# 1. Remove old transform tracks
 	for i in range(target.get_track_count() - 1, -1, -1):

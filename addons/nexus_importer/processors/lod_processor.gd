@@ -12,10 +12,10 @@ func _init():
 
 # ==============================================================================
 
-func process(scene_root: Node, stats: Dictionary):
+func process(scene_root: Node, stats: Dictionary) -> void:
 	_process_node_recursive(scene_root, stats)
 
-func _process_node_recursive(node: Node, stats: Dictionary):
+func _process_node_recursive(node: Node, stats: Dictionary) -> void:
 	if node is GeometryInstance3D:
 		_apply_lod_settings(node, stats)
 	
@@ -24,9 +24,11 @@ func _process_node_recursive(node: Node, stats: Dictionary):
 		
 	_handle_shadow_proxies(node)
 
-func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary):
+func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary) -> void:
 	var extras = node.get_meta("extras") if node.has_meta("extras") else {}
-	
+	if not extras is Dictionary:
+		return
+
 	if extras.has("nexus_visibility_range"):
 		var range_data = extras["nexus_visibility_range"]
 		node.visibility_range_begin = range_data.get("begin", 0.0)
@@ -41,7 +43,7 @@ func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary):
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
 		node.visible = true 
 
-func _handle_shadow_proxies(parent: Node):
+func _handle_shadow_proxies(parent: Node) -> void:
 	var children = parent.get_children()
 	var shadow_proxies = {}
 	var potential_bases = []
@@ -81,6 +83,6 @@ func _handle_shadow_proxies(parent: Node):
 func _get_nexus_node_meta(node: Node) -> Dictionary:
 	if node.has_meta("extras"):
 		var extras = node.get_meta("extras")
-		if extras.has("NEXUS_NODE_METADATA"):
+		if extras is Dictionary and extras.has("NEXUS_NODE_METADATA"):
 			return extras["NEXUS_NODE_METADATA"]
 	return {}

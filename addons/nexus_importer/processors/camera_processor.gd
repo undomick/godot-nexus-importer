@@ -30,15 +30,15 @@ func process(node: Node, node_meta: Dictionary) -> bool:
 		
 	return true
 
-func _apply_orthographic(node: Camera3D, data: Dictionary):
+func _apply_orthographic(node: Camera3D, data: Dictionary) -> void:
 	# Ortho cameras do not need physical lens attributes
 	node.projection = Camera3D.PROJECTION_ORTHOGONAL
 	node.size = data.get("ortho_size", 10.0)
 	node.attributes = null 
 	
-	print("Nexus Camera: Updated '%s' (Orthographic, Size: %.2f)" % [node.name, node.size])
+	print_verbose("Nexus Camera: Updated '%s' (Orthographic, Size: %.2f)" % [node.name, node.size])
 
-func _apply_perspective_physical(node: Camera3D, data: Dictionary):
+func _apply_perspective_physical(node: Camera3D, data: Dictionary) -> void:
 	node.projection = Camera3D.PROJECTION_PERSPECTIVE
 	
 	# We ALWAYS use Physical Attributes for Perspective, 
@@ -66,4 +66,4 @@ func _apply_perspective_physical(node: Camera3D, data: Dictionary):
 		# If DOF is off, set aperture to default, focus doesn't matter.
 		attrs.exposure_aperture = 16.0 # High aperture = everything sharp
 	
-	print("Nexus Camera: Updated '%s' (Perspective, Lens: %.1fmm)" % [node.name, attrs.frustum_focal_length])
+	print_verbose("Nexus Camera: Updated '%s' (Perspective, Lens: %.1fmm)" % [node.name, attrs.frustum_focal_length])

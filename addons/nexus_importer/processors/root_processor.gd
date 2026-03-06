@@ -15,14 +15,14 @@ func apply_script(node: Node, meta: Dictionary) -> bool:
 	return false 
 
 ## Sets physics properties (layers, masks, material) and RigidBody settings.
-func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary):
+func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary) -> void:
 	# Changed from PhysicsBody3D to CollisionObject3D to support Area3D as well
 	if not node is CollisionObject3D: return
-	
+
 	# 1. Collision Layers & Masks
 	if meta.has("collision_layer"):
 		node.collision_layer = meta.get("collision_layer")
-		node.collision_mask = meta.get("collision_mask")
+		node.collision_mask = meta.get("collision_mask", node.collision_layer)
 	
 	# 2. Physics Material (only for PhysicsBody3D; Area3D does not support override)
 	if node is PhysicsBody3D and meta.has("physics_material_path"):
@@ -35,13 +35,20 @@ func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary):
 					# Save info instead of printing
 					stats["physics"] = mat_path.get_file()
 	
-	# 3. Surface Tag (Metadata)
-	if meta.has("physics_surface_name"):
+	# 3. Metadata (nexus_metadata or legacy physics_surface_name)
+	var meta_dict: Dictionary = {}
+	if meta.has("nexus_metadata"):
+		meta_dict = meta["nexus_metadata"].duplicate()
+	# Backward compatibility: migrate legacy physics_surface_name
+	elif meta.has("physics_surface_name"):
 		var surface = meta["physics_surface_name"]
 		if not surface.is_empty():
-			node.set_meta("surface", surface)
-			# Save info instead of printing
-			stats["surface"] = surface
+			meta_dict["surface"] = surface
+	for key in meta_dict:
+		var val = meta_dict[key]
+		node.set_meta(key, val)
+		if key == "surface":
+			stats["surface"] = str(val)
 
 	# 4. RigidBody Specific Settings
 	if node is RigidBody3D and meta.has("rigid_body_settings"):

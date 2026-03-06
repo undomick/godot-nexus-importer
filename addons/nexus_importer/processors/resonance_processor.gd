@@ -32,7 +32,7 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 			fallback_node.name = node.name + "_ResonancePlaceholder"
 			root.add_child(fallback_node)
 			fallback_node.owner = root
-		push_warning("Nexus Resonance nicht aktiv. Bitte Nexus Resonance aktivieren und erneut importieren. '%s' wurde als Node3D-Platzhalter erstellt." % node.name)
+		push_warning("Nexus Resonance not active. Please enable Nexus Resonance and reimport. '%s' was created as a Node3D placeholder." % node.name)
 		if stats.has("resonance"):
 			stats.resonance += 1
 		return true
@@ -79,7 +79,7 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	return true
 
 
-func _load_resonance_material(path: String):
+func _load_resonance_material(path: String) -> Resource:
 	if path.is_empty():
 		return _create_default_resonance_material()
 
@@ -92,7 +92,7 @@ func _load_resonance_material(path: String):
 	return _create_default_resonance_material()
 
 
-func _create_default_resonance_material():
+func _create_default_resonance_material() -> Resource:
 	if not ClassDB.class_exists("ResonanceMaterial"):
 		return null
 	var mat = ClassDB.instantiate("ResonanceMaterial")

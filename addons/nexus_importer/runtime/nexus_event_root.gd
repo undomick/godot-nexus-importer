@@ -1,8 +1,10 @@
 extends Node
 
 ## Stub root script for Nexus animation markers/events.
-## Method call tracks use path "." (root) to avoid "couldn't resolve track" warnings.
-## Override on_nexus_event or connect to nexus_event to react to markers.
+## Assign this script to the scene ROOT when animation method call tracks use path "." (root).
+## This avoids "couldn't resolve track" / "Method not found" warnings when the root
+## Node3D has no on_nexus_event. Override on_nexus_event or connect to nexus_event to react.
+## Use nexus_event_receiver.gd instead when tracks target a dedicated child node (e.g. "NexusEvents").
 
 signal nexus_event(marker_name: String)
 

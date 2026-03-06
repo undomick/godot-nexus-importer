@@ -39,7 +39,7 @@ var camera_processor = CameraProcessor.new()
 var path_processor = PathProcessor.new()
 
 # --- STATISTICS CONTAINER ---
-var stats = {
+var stats: Dictionary = {
 	"paths": 0,
 	"materials": 0,
 	"collisions": 0,
@@ -98,7 +98,9 @@ func _post_import(scene: Node) -> Object:
 	scene.set_meta("_nexus_gltf_path", gltf_path)
 	# Godot 4.4+ puts glTF extras in node meta; older versions may not – inject from glTF if missing
 	_inject_extras_from_gltf(scene, gltf_path)
-	_process_node_recursively(scene, scene, scene_meta)
+	# Pre-pass: nodes under nexus_asset_id will be replaced by instancing – skip resonance/collision to avoid duplicates
+	var nodes_under_instance = _collect_nodes_under_instance(scene)
+	_process_node_recursively(scene, scene, scene_meta, nodes_under_instance)
 	_process_materials_recursively(scene)
 	
 	# --- ANIMATION EXTRACTION (only here!) ---
@@ -112,12 +114,12 @@ func _post_import(scene: Node) -> Object:
 			scene.set_meta("nexus_anim_lib_path", anim_stats.path)
 
 	lod_processor.process(scene, stats)
-	
-	_print_compact_summary(scene.name, export_type, scene_meta.get("root_type", "Node3D"), scene_meta)
+
+	_print_compact_summary(scene.name, export_type, root_type, scene_meta)
 	
 	return scene
 
-func _inject_extras_from_gltf(root: Node, gltf_path: String):
+func _inject_extras_from_gltf(root: Node, gltf_path: String) -> void:
 	## Ensures node extras (NEXUS_NODE_METADATA) are available. Godot 4.4+ imports them to meta;
 	## older versions may not – in that case we read from glTF and inject manually.
 	if gltf_path.is_empty() or not gltf_path.ends_with(".gltf"):
@@ -151,13 +153,31 @@ func _inject_extras_from_gltf(root: Node, gltf_path: String):
 		for i in range(nd.get_child_count() - 1, -1, -1):
 			stack.append(nd.get_child(i))
 
-func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
+func _collect_nodes_under_instance(root: Node) -> Dictionary:
+	## Returns a set (dict of id->true) of nodes that are descendants of a node with nexus_asset_id.
+	## These nodes will be replaced by instancing – skip resonance/collision to avoid duplicates.
+	var result: Dictionary = {}
+	_collect_under_instance_visit(root, false, result)
+	return result
+
+func _collect_under_instance_visit(n: Node, ancestor_has_asset_id: bool, result: Dictionary) -> void:
+	var extras = n.get_meta("extras", {})
+	var node_meta = extras.get(NEXUS_NODE_META) if extras is Dictionary else {}
+	var this_has_asset_id = (node_meta is Dictionary) and not str(node_meta.get("nexus_asset_id", "")).is_empty()
+	var now_inside := ancestor_has_asset_id or this_has_asset_id
+	if ancestor_has_asset_id:
+		result[n.get_instance_id()] = true
+	for child in n.get_children():
+		_collect_under_instance_visit(child, now_inside, result)
+
+func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary, nodes_under_instance: Dictionary = {}) -> void:
 	for i in range(node.get_child_count() - 1, -1, -1):
 		var child = node.get_child(i)
-		_process_node_recursively(child, root, scene_meta)
+		_process_node_recursively(child, root, scene_meta, nodes_under_instance)
 	
 	var node_extras = node.get_meta("extras", {})
-	if not NEXUS_NODE_META in node_extras: return
+	if not node_extras is Dictionary or not NEXUS_NODE_META in node_extras:
+		return
 	var node_meta = node_extras[NEXUS_NODE_META]
 
 	if node_meta.get("nexus_is_lod", false): return
@@ -174,27 +194,28 @@ func _process_node_recursively(node: Node, root: Node, scene_meta: Dictionary):
 		return
 	if camera_processor.process(node, node_meta):
 		stats.cameras += 1
-		pass
 	if bone_attachment_processor.process(node, node_meta, root): return
 
-	# Resonance Geometry (must run before Collision Processor)
-	if resonance_processor.process(node, node_meta, scene_meta, root, stats):
-		return
-
-	# Pass Stats to Collision Processor!
-	if collision_processor.process(node, node_meta, scene_meta, root, stats):
-		return
+	# Skip resonance/collision for nodes under nexus_asset_id – whole subtree gets replaced by instanced asset
+	var skip_geometry_processors = nodes_under_instance.has(node.get_instance_id())
+	if not skip_geometry_processors:
+		# Resonance Geometry (must run before Collision Processor)
+		if resonance_processor.process(node, node_meta, scene_meta, root, stats):
+			return
+		# Pass Stats to Collision Processor!
+		if collision_processor.process(node, node_meta, scene_meta, root, stats):
+			return
 
 	vertex_color_processor.process(node, node_meta)
 	node_processor.process(node, node_meta, scene_meta)
 
-func _process_materials_recursively(node: Node):
+func _process_materials_recursively(node: Node) -> void:
 	# Pass Stats to Material Processor!
 	material_processor.process(node, stats)
 	for child in node.get_children():
 		_process_materials_recursively(child)
 
-func _apply_animation_settings(scene: Node, meta: Dictionary):
+func _apply_animation_settings(scene: Node, meta: Dictionary) -> void:
 	var anim_player = _find_animation_player(scene)
 	if not anim_player: return
 
@@ -240,29 +261,11 @@ func _apply_animation_settings(scene: Node, meta: Dictionary):
 		
 		# B. Method call tracks (visible) + metadata (get_nexus_markers)
 		if marker_data.has(anim_name):
-			var markers = marker_data[anim_name]
-			_remove_legacy_method_tracks(anim)
-			anim.set_meta("nexus_markers", markers)
-			var track_idx = anim.add_track(Animation.TYPE_METHOD)
-			anim.track_set_path(track_idx, NodePath(anim_player.name))
-			for m in markers:
-				var marker_name = m.get("name", "") if m is Dictionary else str(m)
-				var marker_time = m.get("time", 0.0) if m is Dictionary else 0.0
-				var key_data = {"method": "on_nexus_event", "args": [marker_name]}
-				anim.track_insert_key(track_idx, marker_time, key_data)
-				
+			animation_processor.add_marker_tracks(anim, marker_data[anim_name], NodePath(anim_player.name))
+
 		# C. Root Motion Flag
 		if root_motion_data.has(anim_name):
 			anim.set_meta("nexus_root_motion", true)
-
-func _remove_legacy_method_tracks(anim: Animation) -> void:
-	for i in range(anim.get_track_count() - 1, -1, -1):
-		if anim.track_get_type(i) == Animation.TYPE_METHOD:
-			for k in range(anim.track_get_key_count(i)):
-				var key_val = anim.track_get_key_value(i, k)
-				if key_val is Dictionary and key_val.get("method", "") == "on_nexus_event":
-					anim.remove_track(i)
-					break
 
 func _find_animation_player(node: Node) -> AnimationPlayer:
 	if node is AnimationPlayer: return node
@@ -271,7 +274,7 @@ func _find_animation_player(node: Node) -> AnimationPlayer:
 		if res: return res
 	return null
 
-func _print_compact_summary(name: String, type: String, root: String, meta: Dictionary):
+func _print_compact_summary(name: String, type: String, root: String, meta: Dictionary) -> void:
 	var group = meta.get("group_name", "")
 	var script = meta.get("script_path", "").get_file()
 	
@@ -300,7 +303,7 @@ func _print_compact_summary(name: String, type: String, root: String, meta: Dict
 	else:
 		print_rich("[color=cyan]Nexus:[/color] %s (%s) -> [color=gray]%s[/color] -> [color=green]%s[/color]" % [name, root, stat_str, detail_str])
 
-func _print_anim_lib_summary(name: String, anim_stats: Dictionary):
+func _print_anim_lib_summary(name: String, anim_stats: Dictionary) -> void:
 	var extracted = anim_stats.get("extracted", 0)
 	var path = anim_stats.get("path", "")
 	if path.is_empty():

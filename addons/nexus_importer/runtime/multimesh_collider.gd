@@ -9,11 +9,13 @@ extends MultiMeshInstance3D
 ## Local transforms for each collision shape (assigned by MultiMesh processor).
 @export var shape_transforms: Array[Transform3D] = []
 
+const DEFAULT_COLLISION_LAYER := 1
+
 # Internal lists for cleanup
 var _body_rids: Array[RID] = []
-var _debug_nodes: Array[Node3D] = [] 
+var _debug_nodes: Array[Node3D] = []
 
-func _ready():
+func _ready() -> void:
 	# Wait for the scene to fully initialize
 	await get_tree().process_frame
 	
@@ -30,13 +32,14 @@ func _ready():
 	
 	_generate_bodies()
 
-func _generate_bodies():
+func _generate_bodies() -> void:
 	var ps = PhysicsServer3D
 	var world_rid = get_world_3d().space
 	var base_transform = global_transform
 	var instance_count = multimesh.instance_count
-	
-	print("Nexus Collider: Starting generation (Debug Mode: %s)..." % str(debug_mode))
+
+	if debug_mode:
+		print("Nexus Collider: Starting generation (Debug Mode: %s)..." % str(debug_mode))
 	
 	for i in range(instance_count):
 		var inst_transform = multimesh.get_instance_transform(i)
@@ -65,15 +68,16 @@ func _generate_bodies():
 		# Set final position of the body
 		ps.body_set_state(body_rid, PhysicsServer3D.BODY_STATE_TRANSFORM, final_transform)
 		
-		# Set Collision Layers (Default Layer 1)
-		ps.body_set_collision_layer(body_rid, 1)
-		ps.body_set_collision_mask(body_rid, 1)
-		
-		_body_rids.append(body_rid)
-		
-	print("Nexus Collider: Done. Created %d physics bodies." % _body_rids.size())
+		# Set Collision Layers
+		ps.body_set_collision_layer(body_rid, DEFAULT_COLLISION_LAYER)
+		ps.body_set_collision_mask(body_rid, DEFAULT_COLLISION_LAYER)
 
-func _create_visual_debug_shape(shape: Shape3D, global_pos: Transform3D):
+		_body_rids.append(body_rid)
+
+	if debug_mode:
+		print("Nexus Collider: Done. Created %d physics bodies." % _body_rids.size())
+
+func _create_visual_debug_shape(shape: Shape3D, global_pos: Transform3D) -> void:
 	# Retrieve the debug mesh directly from the Shape3D resource
 	var debug_mesh = shape.get_debug_mesh()
 	if not debug_mesh:
@@ -95,13 +99,13 @@ func _create_visual_debug_shape(shape: Shape3D, global_pos: Transform3D):
 	
 	_debug_nodes.append(mesh_instance)
 
-func _clear_debug_meshes():
+func _clear_debug_meshes() -> void:
 	for node in _debug_nodes:
 		if is_instance_valid(node):
 			node.queue_free()
 	_debug_nodes.clear()
 
-func _exit_tree():
+func _exit_tree() -> void:
 	# CLEANUP: Free RIDs from PhysicsServer to prevent memory leaks
 	var ps = PhysicsServer3D
 	for rid in _body_rids:

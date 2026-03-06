@@ -14,7 +14,7 @@ func process(node: Node, node_meta: Dictionary, parent: Node) -> bool:
 	if points_array.size() < 2:
 		return false
 		
-	print("Nexus Path: Converting '%s' to Path3D (%d points, Cyclic: %s)..." % [node.name, points_array.size(), str(is_cyclic)])
+	print_verbose("Nexus Path: Converting '%s' to Path3D (%d points, Cyclic: %s)..." % [node.name, points_array.size(), str(is_cyclic)])
 	
 	var path_node = Path3D.new()
 	path_node.name = node.name

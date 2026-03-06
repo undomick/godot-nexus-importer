@@ -26,7 +26,7 @@ func process(node: Node, meta: Dictionary) -> void:
 		match mapping:
 			"ALBEDO_TINT":
 				if channel_index == 0:
-					print(" -> Applying 'Albedo Tint' for layer '%s'." % blender_name)
+					print_verbose(" -> Applying 'Albedo Tint' for layer '%s'." % blender_name)
 					if not mesh_was_duplicated:
 						node.mesh = node.mesh.duplicate()
 						mesh_was_duplicated = true
@@ -35,9 +35,9 @@ func process(node: Node, meta: Dictionary) -> void:
 					push_warning("Nexus: Layer '%s' is on %s. Albedo Tint only works on COLOR. Use custom shader." % [blender_name, shader_attribute])
 
 			_:
-				print(" -> Layer '%s' mapped to %s for purpose '%s'." % [blender_name, shader_attribute, mapping])
+				print_verbose(" -> Layer '%s' mapped to %s for purpose '%s'." % [blender_name, shader_attribute, mapping])
 
-func _apply_albedo_tint(node: MeshInstance3D):
+func _apply_albedo_tint(node: MeshInstance3D) -> void:
 	for surface_idx in range(node.mesh.get_surface_count()):
 		var mat: Material = node.mesh.surface_get_material(surface_idx)
 		if mat is StandardMaterial3D:

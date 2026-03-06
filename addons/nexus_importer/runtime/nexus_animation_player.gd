@@ -11,7 +11,7 @@ func on_nexus_event(marker_name: String) -> void:
 
 ## Returns markers for the given animation, or current if anim_name is empty.
 ## Format: [{"name": "footstep", "time": 0.5}, ...]
-func get_nexus_markers(anim_name: String = "") -> Array:
+func get_nexus_markers(anim_name: String = "") -> Array[Dictionary]:
 	var name_to_use = anim_name if not anim_name.is_empty() else current_animation
 	if name_to_use.is_empty():
 		return []

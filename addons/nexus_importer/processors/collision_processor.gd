@@ -31,14 +31,23 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	var offset_transform = Transform3D(Basis(), local_offset)
 	col_shape_node.transform = node.transform * offset_transform
 	
-	# 4. Meta-Data (Surface Tags)
-	var final_tag = ""
-	if node_meta.has("nexus_surface_override"):
-		final_tag = node_meta["nexus_surface_override"]
-	elif scene_meta.has("physics_surface_name"):
-		final_tag = scene_meta["physics_surface_name"]
-	if not final_tag.is_empty():
-		col_shape_node.set_meta("surface", final_tag)
+	# 4. Meta-Data (merge scene + node, object overrides)
+	var final_meta: Dictionary = {}
+	if scene_meta.has("nexus_metadata"):
+		for k in scene_meta["nexus_metadata"]:
+			final_meta[k] = scene_meta["nexus_metadata"][k]
+	if node_meta.has("nexus_metadata"):
+		for k in node_meta["nexus_metadata"]:
+			final_meta[k] = node_meta["nexus_metadata"][k]
+	# Backward compatibility: legacy physics_surface_name / nexus_surface_override
+	if node_meta.has("nexus_surface_override") and not final_meta.has("surface"):
+		final_meta["surface"] = node_meta["nexus_surface_override"]
+	elif scene_meta.has("physics_surface_name") and not final_meta.has("surface"):
+		var legacy = scene_meta["physics_surface_name"]
+		if not legacy.is_empty():
+			final_meta["surface"] = legacy
+	for key in final_meta:
+		col_shape_node.set_meta(key, final_meta[key])
 
 	# --- REPLACE LOGIC ---
 	# Replace = remove mesh, keep only CollisionShape3D.

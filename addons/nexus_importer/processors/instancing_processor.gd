@@ -18,16 +18,26 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 			if json.parse(file.get_as_text()) == OK:
 				var asset_index = json.get_data()
 				if asset_index.has(asset_id):
-					var rel = asset_index[asset_id]["relative_path"]
-					
-					var base_gltf_path = _ensure_res_path(rel)
+					var entry = asset_index[asset_id]
+					if not entry is Dictionary:
+						file.close()
+						push_error("Nexus Instancer: Invalid index entry for Asset ID '%s'." % asset_id)
+						return false
+					var rel = entry.get("relative_path", "")
+					var base_gltf_path = NexusUtils.validate_index_path(rel)
+					if base_gltf_path.is_empty():
+						file.close()
+						push_error("Nexus Instancer: Invalid path in index for Asset ID '%s'." % asset_id)
+						return false
 					
 					var editable_scene_path = base_gltf_path.get_basename() + "_editable.tscn"
 					scene_path = editable_scene_path if ResourceLoader.exists(editable_scene_path) else base_gltf_path
 				else:
+					file.close()
 					push_error("Nexus Instancer: Asset ID '%s' not found." % asset_id)
 					return false
-	
+			file.close()
+
 	if scene_path.is_empty(): return false
 
 	if not ResourceLoader.exists(scene_path):
@@ -51,12 +61,6 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	instance.owner = root
 	
 	node.free()
-	
-	print("Nexus Instancer: Replaced '%s' with instance of '%s'." % [instance.name, scene_path.get_file()])
-	return true
 
-# Helper to avoid double res://
-func _ensure_res_path(path: String) -> String:
-	if path.begins_with("res://"):
-		return path
-	return "res://" + path
+	print_verbose("Nexus Instancer: Replaced '%s' with instance of '%s'." % [instance.name, scene_path.get_file()])
+	return true

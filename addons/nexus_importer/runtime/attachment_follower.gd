@@ -38,7 +38,7 @@ func _ready() -> void:
 
 
 func _call_deferred_reparent(old_parent: Node, target_node: Node3D, local_offset: Transform3D) -> void:
-	if not is_instance_valid(old_parent) or not is_instance_valid(target_node):
+	if not is_instance_valid(self) or not is_instance_valid(old_parent) or not is_instance_valid(target_node):
 		return
 	if get_parent():
 		get_parent().remove_child(self)
