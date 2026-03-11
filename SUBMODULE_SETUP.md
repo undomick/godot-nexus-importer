@@ -17,7 +17,8 @@ Then create a symlink so Godot finds the addon:
 
 **Windows (Developer Mode or as Administrator):**
 ```powershell
-mklink /D addons\nexus_importer godot-nexus-importer\addons\nexus_importer
+New-Item -ItemType Directory -Path addons -Force
+New-Item -ItemType SymbolicLink -Path addons\nexus_importer -Target godot-nexus-importer\addons\nexus_importer
 ```
 
 **Linux / macOS:**
@@ -34,7 +35,8 @@ git submodule add https://github.com/undomick/godot-nexus-importer.git godot-nex
 
 **Windows:**
 ```powershell
-mklink /D game\addons\nexus_importer godot-nexus-importer\addons\nexus_importer
+New-Item -ItemType Directory -Path game\addons -Force
+New-Item -ItemType SymbolicLink -Path game\addons\nexus_importer -Target godot-nexus-importer\addons\nexus_importer
 ```
 
 **Linux / macOS:**
