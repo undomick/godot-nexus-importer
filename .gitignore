@@ -1,3 +1,7 @@
+# Build artifacts
+build_staging/
+nexus_importer-*.zip
+
 # Godot 4+ specific ignores
 .godot/
 .nomedia

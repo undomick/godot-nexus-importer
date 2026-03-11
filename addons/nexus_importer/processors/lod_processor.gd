@@ -10,6 +10,10 @@ var _lod_regex: RegEx = RegEx.new()
 func _init():
 	_lod_regex.compile("^(.*)_LOD\\d+$")
 
+
+func _is_lod_or_shadow_node(node_name: String) -> bool:
+	return _lod_regex.search(node_name) != null or node_name.ends_with("_Shadow")
+
 # ==============================================================================
 
 func process(scene_root: Node, stats: Dictionary) -> void:
@@ -29,15 +33,21 @@ func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary) -> void:
 	if not extras is Dictionary:
 		return
 
-	if extras.has("nexus_visibility_range"):
+	# Store in meta; applied deferred by nexus_lod_deferred.gd to avoid "data.tree is null"
+	# when opening scenes at editor startup (GeometryInstance3D setters can call get_tree())
+	# Only apply visibility_range for LOD meshes (_LOD0, _LOD1, ... or _Shadow)
+	if extras.has("nexus_visibility_range") and _is_lod_or_shadow_node(node.name):
 		var range_data = extras["nexus_visibility_range"]
-		node.visibility_range_begin = range_data.get("begin", 0.0)
-		node.visibility_range_begin_margin = range_data.get("begin_margin", 0.0)
-		node.visibility_range_end = range_data.get("end", 0.0)
-		node.visibility_range_end_margin = range_data.get("end_margin", 0.0)
-		node.visibility_range_fade_mode = FADE_MODE
+		if not range_data is Dictionary:
+			range_data = {}
+		node.set_meta("nexus_visibility_range", {
+			"begin": range_data.get("begin", 0.0),
+			"begin_margin": range_data.get("begin_margin", 0.0),
+			"end": range_data.get("end", 0.0),
+			"end_margin": range_data.get("end_margin", 0.0)
+		})
 		stats.lods += 1
-		
+
 	var nexus_meta = _get_nexus_node_meta(node)
 	if nexus_meta.get("nexus_is_shadow_proxy", false):
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
@@ -74,11 +84,11 @@ func _handle_shadow_proxies(parent: Node) -> void:
 		if shadow_proxies.has(base_name):
 			var proxy = shadow_proxies[base_name]
 			mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			
-			if mesh.visibility_range_end > proxy.visibility_range_end:
-				proxy.visibility_range_end = mesh.visibility_range_end
-				proxy.visibility_range_end_margin = mesh.visibility_range_end_margin
-				proxy.visibility_range_fade_mode = FADE_MODE
+
+			var mesh_end = _get_visibility_range_end(mesh)
+			var proxy_end = _get_visibility_range_end(proxy)
+			if mesh_end > proxy_end:
+				_update_proxy_range_meta(proxy, mesh)
 
 func _get_nexus_node_meta(node: Node) -> Dictionary:
 	if node.has_meta("extras"):
@@ -86,3 +96,28 @@ func _get_nexus_node_meta(node: Node) -> Dictionary:
 		if extras is Dictionary and extras.has("NEXUS_NODE_METADATA"):
 			return extras["NEXUS_NODE_METADATA"]
 	return {}
+
+
+func _get_visibility_range_end(node: GeometryInstance3D) -> float:
+	if node.has_meta("nexus_visibility_range"):
+		var d = node.get_meta("nexus_visibility_range")
+		if d is Dictionary:
+			return d.get("end", 0.0)
+	return node.visibility_range_end
+
+
+func _update_proxy_range_meta(proxy: GeometryInstance3D, mesh: GeometryInstance3D) -> void:
+	var mesh_meta = mesh.get_meta("nexus_visibility_range", {}) if mesh.has_meta("nexus_visibility_range") else {}
+	var mesh_end = mesh_meta.get("end", mesh.visibility_range_end) if mesh_meta is Dictionary else mesh.visibility_range_end
+	var mesh_margin = mesh_meta.get("end_margin", mesh.visibility_range_end_margin) if mesh_meta is Dictionary else mesh.visibility_range_end_margin
+
+	var d: Dictionary
+	if proxy.has_meta("nexus_visibility_range"):
+		d = proxy.get_meta("nexus_visibility_range")
+		if not d is Dictionary:
+			d = {}
+	else:
+		d = {"begin": 0.0, "begin_margin": 0.0, "end": 0.0, "end_margin": 0.0}
+	d["end"] = mesh_end
+	d["end_margin"] = mesh_margin
+	proxy.set_meta("nexus_visibility_range", d)

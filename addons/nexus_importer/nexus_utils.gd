@@ -13,6 +13,15 @@ static func ensure_res_path(path: String) -> String:
 		return path
 	return "res://" + path
 
+## Sanitizes a node name for Godot (removes @ . : / " % and ensures it does not start with a digit).
+static func sanitize_node_name(name: String) -> String:
+	if name.is_empty():
+		return "Resonance"
+	var s = name.replace("@", "_").replace(".", "_").replace(":", "_").replace("/", "_").replace("\"", "_").replace("%", "_")
+	if s.length() > 0 and s[0] >= "0" and s[0] <= "9":
+		s = "n_" + s
+	return s if not s.is_empty() else "Resonance"
+
 ## Validates a path from asset/material index to prevent path traversal.
 ## Returns the full res:// path if safe, empty string otherwise.
 ## Rejects: paths with "..", paths escaping project, absolute system paths.

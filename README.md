@@ -4,19 +4,28 @@
 
 **The intelligent link for your Blender-Godot pipeline. Turn your Blender exports into game-ready Godot assets, automatically.**
 
-Tired of re-configuring your scenes in Godot after every re-import from Blender? Do you spend hours manually adding `CollisionShape3D` nodes, re-assigning materials, and attaching scripts to every single imported asset?
+Tired of re-configuring your scenes in Godot after every re-import from Blender? The Nexus Importer acts as an intelligent post-processor that understands your assets exported from Blender and automatically configures them for in-game use.
 
-The Nexus Importer puts an end to this repetitive process. By seamlessly integrating with the Godot engine, it acts as an intelligent post-processor that understands your assets exported from Blender and automatically configures them for in-game use. Design your assets in Blender and let Nexus handle the rest.
+> **Prerequisite:** This addon works exclusively with glTF files exported by the [Nexus: Godot Pipeline](https://superhivemarket.com/products/nexus-godot-pipeline) Blender addon. It relies on metadata written during export.
 
-> ### ⚠️ Important Prerequisite!
->
-> The Nexus Importer for Godot is **not** a general-purpose GLTF importer. It is the **exclusive counterpart** to our Blender addon, **[Nexus: Blender to Godot](LINK_TO_MY_BLENDER_ADDON_HERE)**.
->
-> This Godot addon will only work as intended on `.gltf` files that have been exported using the corresponding Blender addon, as it relies on the special metadata written during the export process.
+## Installation
 
----
+**Option A: Godot Asset Library** (when published)
 
-### Key Features - Your New Workflow
+1. Open your Godot project.
+2. AssetLib → search for "Nexus Pipeline Importer" → Install.
+
+**Option B: Manual install from release**
+
+1. Download `nexus_importer-<version>.zip` from [Releases](https://github.com/undomick/godot-nexus-importer/releases).
+2. Extract to your Godot project root (you should get `addons/nexus_importer/`).
+3. Project → Project Settings → Plugins → enable "Nexus Importer".
+
+**Option C: Git submodule**
+
+See [SUBMODULE_SETUP.md](SUBMODULE_SETUP.md) for submodule and symlink instructions.
+
+## Key Features - Your New Workflow
 
 Instead of post-processing your assets in Godot, you define everything at the source: in Blender. The Nexus Importer interprets your settings and builds the scenes just the way you need them.
 
@@ -32,23 +41,18 @@ Instead of post-processing your assets in Godot, you define everything at the so
 *   **Scripts & Groups on Autopilot:**
     Assign a script to your assets or add them to a Godot group right from Blender's UI. Your objects are correctly configured the moment they arrive in Godot.
 
+*   **Nexus Resonance (Real Spatial Audio) support:**
+    Instead of creating for every geometry an extra ResonanceGeometry-Node (which can get quite tedious), you can assign it from within Blender to your asset. Get Nexus Resonance from [here](https://github.com/undomick/godot-nexus-resonance)!
+
 *   **And Many More Features:**
-    The Nexus pipeline is packed with tools to make your life easier: pre-configured root node presets (**StaticBody3D**, **RigidBody3D**, etc.), a flexible **folder structure** for exports, a powerful **batch-export** for automating entire project folders, optional **mesh optimization** (via glTFpack), and a robust pipeline for **Vertex Colors**.
-
-### How It Works
-
-The magic is in the metadata.
-1.  The **Nexus Blender addon** embeds a set of "instructions" (`NEXUS_METADATA`) into the `.gltf` file during export.
-2.  The **Nexus Importer in Godot** reads these instructions during the import process.
-3.  It uses a modular system of processors to modify, extend, and package the imported scene into a final, instanced `.tscn` file based on those instructions.
-
-### Installation
-
-1.  Download the addon from the `addons/` directory of this repository.
-2.  Place the `nexus_importer` folder into the `addons/` folder of your Godot project.
-3.  Go to `Project -> Project Settings -> Plugins` and enable the "Nexus Importer" plugin.
-
-That's it! The importer is now active and will automatically process any `.gltf` file created with the Nexus Blender addon.
+    The Nexus pipeline is packed with tools to make your life easier: 
+    * manage asset presets/templates
+    * a flexible **folder structure** for exports
+    * a powerful **batch-export** for automating entire project folders
+    * optional **mesh optimization** (via glTFpack)
+    * supports exports of cameras, lights, paths directly out of Blender
+    * asset tracking and clean up
+    * automatic or manual creation of wrapper scenes and/or inherited scenes from glTF
 
 ## 💬 Support & Community
 

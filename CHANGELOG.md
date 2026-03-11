@@ -2,6 +2,38 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
+## [1.3.0] - 2026-03-10
+
+### Added
+
+#### Blender Addon (nexus_b2g)
+
+- **Icon Bar**: Left-hand vertical icon bar for quick section navigation. Click an icon to select and display the corresponding section (blue highlight). Pin sections to keep them visible (orange/red highlight).
+
+## [1.2.1] - 2026-03-09
+
+### Added
+
+#### Godot Addon (nexus_importer)
+
+- **Wrapper and Inherited Scenes**: The addon can now create both Wrapper Scenes and Inherited Scenes for glTF assets. Scene type is configurable via tools (`nexus/import/scene_style`); automatic creation uses the selected style. Alternatively, use the FileSystem context menu on glTF files or folders: "Create Nexus Wrapper Scene" or "Create Nexus Inherited Scene" to create the desired scene type on demand.
+
+### Fixed
+
+#### Godot Addon (nexus_importer)
+
+- **Manual Import Mode: glTFs not processed**: When Import Mode was set to Manual, glTFs were not interpreted at all
+
+#### Blender Addon (nexus_b2g)
+
+- **Resonance Geometry Dynamic overwritten by Static**: When exporting assets with Resonance Geometry set to Dynamic, the value was incorrectly reset to Static in both the UI and the exported glTF. This occurred when `update_object_properties` reapplied the root-type default (Static for StaticBody/Area) even after the user had explicitly chosen Dynamic. The logic now preserves an explicit Dynamic choice and no longer overwrites it with Static.
+
+### Known Issues
+
+#### Blender Addon (nexus_b2g)
+
+- **Zen UV compatibility**: When Zen UV and Nexus are both enabled, selecting Animation Library or Multimesh in the Collection section may cause Blender to crash. This is caused by Zen UV's depsgraph handler (Blender issue #128361). Workaround: Disable Zen UV when using these export types. Nexus shows a warning when both are active.
+
 ## [1.2.0] - 2026-03-07
 
 ### Added

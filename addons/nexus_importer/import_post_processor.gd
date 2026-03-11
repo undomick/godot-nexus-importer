@@ -77,6 +77,7 @@ func _post_import(scene: Node) -> Object:
 	
 	var export_type = scene_meta.get("export_type", "UNKNOWN")
 	var root_type = scene_meta.get("root_type", "Node3D")
+	scene.set_meta("_nexus_export_type", export_type)
 	
 	# --- EXPORT TYPE CHECKS ---
 	if export_type == "ANIMATION_LIB":
@@ -113,10 +114,19 @@ func _post_import(scene: Node) -> Object:
 		if anim_stats.extracted > 0:
 			scene.set_meta("nexus_anim_lib_path", anim_stats.path)
 
-	lod_processor.process(scene, stats)
+	if export_type in ["ASSET", "SKELETAL_ASSET"]:
+		lod_processor.process(scene, stats)
+
+	# Inject deferred LOD applicator when visibility range was applied (stored in meta)
+	if stats.lods > 0:
+		var applicator = Node.new()
+		applicator.name = "NexusLodDeferred"
+		applicator.set_script(load("res://addons/nexus_importer/runtime/nexus_lod_deferred.gd"))
+		scene.add_child(applicator)
+		applicator.owner = scene
 
 	_print_compact_summary(scene.name, export_type, root_type, scene_meta)
-	
+
 	return scene
 
 func _inject_extras_from_gltf(root: Node, gltf_path: String) -> void:
@@ -234,11 +244,9 @@ func _apply_animation_settings(scene: Node, meta: Dictionary) -> void:
 	var anim_list = library.get_animation_list()
 	stats.anims = anim_list.size()
 
-	# Autoplay and current animation for immediate editor preview
+	# Use nexus_autoplay meta (deferred play) to avoid "data.tree is null" when opening at editor startup
 	if anim_list.size() > 0:
-		anim_player.autoplay = anim_list[0]
-		anim_player.current_animation = anim_list[0] 
-		anim_player.advance(0)
+		anim_player.set_meta("nexus_autoplay", anim_list[0])
 
 	# 4. Check for Nexus Metadata
 	var loop_data = meta.get("nexus_animation_loops", {})

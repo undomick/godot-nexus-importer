@@ -1,8 +1,9 @@
 @tool
 extends Object
 
-## Creates ResonanceStaticGeometry or ResonanceDynamicGeometry from nexus_mesh_collision_shape
-## when Nexus Resonance addon is active. Fallback: Node3D + warning if Resonance not available.
+## Creates ResonanceGeometry from nexus_mesh_collision_shape. Uses Sidecar approach: mesh is saved
+## to .res, MeshInstance3D is removed. ResonanceGeometry is created later when building wrapper or
+## inherited scene from nexus_resonance_nodes metadata. GLTF is always interpreted the same.
 
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: Node, stats: Dictionary) -> bool:
 	var shape_type = node_meta.get("nexus_mesh_collision_shape", "")
@@ -16,85 +17,69 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	if not parent:
 		return false
 
-	# Check if Nexus Resonance is available
-	if not ClassDB.class_exists("ResonanceStaticGeometry"):
-		# Fallback: create Node3D placeholder and warn
-		var fallback_node = Node3D.new()
-		fallback_node.transform = node.transform
-		var discard_mesh_fb = node_meta.get("discard_mesh", false)
-		if discard_mesh_fb:
-			fallback_node.name = node.name
-			parent.remove_child(node)
-			parent.add_child(fallback_node)
-			fallback_node.owner = root
-			node.free()
-		else:
-			fallback_node.name = node.name + "_ResonancePlaceholder"
-			root.add_child(fallback_node)
-			fallback_node.owner = root
-		push_warning("Nexus Resonance not active. Please enable Nexus Resonance and reimport. '%s' was created as a Node3D placeholder." % node.name)
+	var discard_mesh = node_meta.get("discard_mesh", false) or node_meta.get("nexus_discard_mesh", false)
+	var material_path: String = node_meta.get("nexus_resonance_material_path", "")
+	# Always use Sidecar: mesh to .res, remove MeshInstance3D, store metadata
+	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
+	if gltf_path.is_empty():
+		push_warning("Nexus Resonance: No _nexus_gltf_path on root - cannot save mesh sidecar.")
 		if stats.has("resonance"):
 			stats.resonance += 1
 		return true
 
-	# Load ResonanceMaterial
-	var material_path: String = node_meta.get("nexus_resonance_material_path", "")
-	var material = _load_resonance_material(material_path)
+	var mesh_ref = node.mesh
+	var node_name_for_resonance: String = node.name
+	var gltf_dir = gltf_path.get_base_dir()
+	var gltf_basename = gltf_path.get_file().get_basename()
+	# Avoid duplication: if node.name is "SM_Door_reso", use "reso" as short part
+	var short_name: String = node.name
+	if node.name.begins_with(gltf_basename + "_"):
+		short_name = node.name.substr((gltf_basename + "_").length())
+	var base_file = gltf_basename + "_" + NexusUtils.sanitize_node_name(short_name)
 
-	# Create ResonanceGeometry node
-	var resonance_node: Node3D
-	if shape_type == "RESONANCE_STATIC":
-		resonance_node = ClassDB.instantiate("ResonanceStaticGeometry")
-	else:
-		resonance_node = ClassDB.instantiate("ResonanceDynamicGeometry")
+	var mesh_file = base_file + ".res"
+	var mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
+	var idx = 0
+	while ResourceLoader.exists(mesh_path):
+		idx += 1
+		mesh_file = base_file + "_" + str(idx) + ".res"
+		mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
 
-	var mesh_ref = node.mesh  # Capture before potential node.free()
-	resonance_node.transform = node.transform
-	if resonance_node.has_method("set_material"):
-		resonance_node.set_material(material)
-	else:
-		resonance_node.set("material", material)
-	if resonance_node.has_method("set_geometry_override"):
-		resonance_node.set_geometry_override(mesh_ref)
-	else:
-		resonance_node.set("geometry_override", mesh_ref)
+	var save_err = ResourceSaver.save(mesh_ref, mesh_path)
+	if save_err != OK:
+		push_error("Nexus Resonance: Failed to save mesh sidecar '%s': %s" % [mesh_path, error_string(save_err)])
+		if stats.has("resonance"):
+			stats.resonance += 1
+		return true
 
-	var discard_mesh = node_meta.get("discard_mesh", false)
-	if discard_mesh:
-		# Replace MeshInstance3D with ResonanceGeometry (same position in hierarchy)
-		resonance_node.name = node.name
-		parent.remove_child(node)
-		parent.add_child(resonance_node)
-		resonance_node.owner = root
-		node.free()
-	else:
-		# Keep MeshInstance3D, add ResonanceGeometry as child of root
-		resonance_node.name = node.name + "_Resonance"
-		root.add_child(resonance_node)
-		resonance_node.owner = root
+	# Compute transform in root's local space (avoids get_global_transform when !is_inside_tree)
+	var transform_rel = _get_transform_relative_to_root(root, node)
+	var transform_str = var_to_str(transform_rel)
 
+	parent.remove_child(node)
+	node.free()
+
+	var nodes_array: Array = root.get_meta("nexus_resonance_nodes", [])
+	nodes_array.append({
+		"mesh_path": mesh_path,
+		"transform_str": transform_str,
+		"node_name": node_name_for_resonance,
+		"material_path": material_path,
+		"type": shape_type,
+		"discard_mesh": discard_mesh
+	})
+	root.set_meta("nexus_resonance_nodes", nodes_array)
 	if stats.has("resonance"):
 		stats.resonance += 1
-
 	return true
 
 
-func _load_resonance_material(path: String) -> Resource:
-	if path.is_empty():
-		return _create_default_resonance_material()
-
-	if ResourceLoader.exists(path):
-		var res = load(path)
-		if res and res.get_class() == "ResonanceMaterial":
-			return res
-
-	# Path invalid or resource not ResonanceMaterial - use default
-	return _create_default_resonance_material()
-
-
-func _create_default_resonance_material() -> Resource:
-	if not ClassDB.class_exists("ResonanceMaterial"):
-		return null
-	var mat = ClassDB.instantiate("ResonanceMaterial")
-	# C++ defaults: absorption 0.1/0.2/0.3, scattering 0.05, transmission 0.01
-	return mat
+## Computes node's transform relative to root by walking the parent chain.
+## Works during import when nodes may not be in the scene tree (is_inside_tree() false).
+func _get_transform_relative_to_root(root: Node, node: Node) -> Transform3D:
+	var t = node.transform
+	var p = node.get_parent()
+	while p and p != root:
+		t = p.transform * t
+		p = p.get_parent()
+	return t

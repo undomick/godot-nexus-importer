@@ -152,25 +152,26 @@ func _find_anchor_node_name(node: Node) -> String:
 	return ""
 
 ## Path remapping logic for animation tracks.
+## Uses "." (AnimationPlayer's parent = glTF root) so paths work for both Wrapper and Inherited.
+## Paths resolve from AnimationPlayer's root_node (defaults to parent).
 func _calculate_new_path(old_path: NodePath, instance_name: String, anchor_name: String) -> NodePath:
 	var path_str = str(old_path)
 	var node_target_name = old_path.get_name(0)  # First part of path (e.g. "Anchor" or "Bone")
 
-	# If track points to "Anchor" -> we want to move the root (instance).
-	# Path becomes: "InstanceName:property"
+	# If track points to "Anchor" or "." -> animate the glTF root (AnimationPlayer's parent).
+	# Path becomes: ".:property" (parent is resolution base when root_node empty)
 	if node_target_name == anchor_name and anchor_name != "":
 		var property_path = old_path.get_concatenated_subnames()
-		return NodePath(instance_name + ":" + property_path)
+		return NodePath(".:" + property_path)
 
-	# If track points to "." (Blender Root Motion)
 	elif node_target_name == ".":
 		var property_path = old_path.get_concatenated_subnames()
-		return NodePath(instance_name + ":" + property_path)
+		return NodePath(".:" + property_path)
 
-	# All other tracks (asset parts, bones) -> simply prefix.
-	# Path becomes: "InstanceName/OriginalPath"
+	# All other tracks (asset parts, bones) -> relative to glTF root.
+	# Path becomes: "./OriginalPath" or "OriginalPath"
 	else:
-		return NodePath(instance_name + "/" + path_str)
+		return NodePath(path_str)
 
 ## For NEW animations.
 func _repath_tracks(anim: Animation, instance_name: String, anchor_name: String) -> void:

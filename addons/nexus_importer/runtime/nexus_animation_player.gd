@@ -9,6 +9,17 @@ func on_nexus_event(marker_name: String) -> void:
 	nexus_event.emit(marker_name)
 
 
+func _ready() -> void:
+	var autoplay_name = get_meta("nexus_autoplay", "")
+	if not autoplay_name.is_empty():
+		call_deferred("_do_nexus_autoplay", autoplay_name)
+
+
+func _do_nexus_autoplay(anim_name: String) -> void:
+	if anim_name in get_animation_list():
+		play(anim_name)
+
+
 ## Returns markers for the given animation, or current if anim_name is empty.
 ## Format: [{"name": "footstep", "time": 0.5}, ...]
 func get_nexus_markers(anim_name: String = "") -> Array[Dictionary]:
