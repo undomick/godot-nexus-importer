@@ -21,10 +21,7 @@ jobs:
         run: cp LICENSE addons/nexus_importer/LICENSE
 
       - name: Create ZIP
-        run: |
-          cd addons
-          zip -r ../nexus_importer-${{ steps.version.outputs.VERSION }}.zip nexus_importer
-          cd ..
+        run: zip -r nexus_importer-${{ steps.version.outputs.VERSION }}.zip addons
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
