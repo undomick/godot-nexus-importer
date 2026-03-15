@@ -21,8 +21,9 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           # Extract section from ## [X.Y.Z] until next ## [ (Keep a Changelog format)
-          awk -v ver="[${VERSION}]" '
-            $0 ~ "^## " ver " " { found=1; next }
+          # Use index() for literal match - [ ] are regex char classes in ~
+          awk -v marker="## [${VERSION}]" '
+            index($0, marker) == 1 { found=1; next }
             found && /^## \[/ { exit }
             found { print }
           ' CHANGELOG.md > release_notes.md
