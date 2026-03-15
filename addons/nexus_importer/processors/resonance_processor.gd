@@ -37,13 +37,17 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 		short_name = node.name.substr((gltf_basename + "_").length())
 	var base_file = gltf_basename + "_" + NexusUtils.sanitize_node_name(short_name)
 
+	# Use deterministic path and overwrite on reimport. Only use idx for same-name collisions within this import.
+	var paths_used: Array = root.get_meta("nexus_resonance_paths_used", [])
 	var mesh_file = base_file + ".res"
 	var mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
 	var idx = 0
-	while ResourceLoader.exists(mesh_path):
+	while mesh_path in paths_used:
 		idx += 1
 		mesh_file = base_file + "_" + str(idx) + ".res"
 		mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
+	paths_used.append(mesh_path)
+	root.set_meta("nexus_resonance_paths_used", paths_used)
 
 	var save_err = ResourceSaver.save(mesh_ref, mesh_path)
 	if save_err != OK:

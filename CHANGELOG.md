@@ -2,6 +2,15 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
+## [1.3.1] - 2026-03-15
+
+### Fixed
+
+#### Godot Addon (nexus_importer)
+
+- **In some cases "importer for type '' not found" occured on Reimport**: Materials (.tres) were incorrectly queued for reimport. Godot has no importer for native resource formats; calling reimport_files on .tres triggered the error. Materials are still discovered for texture directory scanning but are no longer passed to reimport_files.
+- **Duplicate .res files for Resonance Geometry on Reimport**: Resonance geometry sidecar .res files were created with incremented suffixes (SM_Door_reso_1.res, ...) whenever the base file already existed. The resonance processor now overwrites the existing file on reimport. The idx suffix is only used when multiple resonance nodes in the same glTF share the same base name.
+
 ## [1.3.0] - 2026-03-10
 
 ### Added

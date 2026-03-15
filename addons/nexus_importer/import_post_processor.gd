@@ -101,6 +101,8 @@ func _post_import(scene: Node) -> Object:
 	_inject_extras_from_gltf(scene, gltf_path)
 	# Pre-pass: nodes under nexus_asset_id will be replaced by instancing – skip resonance/collision to avoid duplicates
 	var nodes_under_instance = _collect_nodes_under_instance(scene)
+	# Resonance processor reuses paths within same import; overwrites on reimport. Must be reset per asset.
+	scene.set_meta("nexus_resonance_paths_used", [])
 	_process_node_recursively(scene, scene, scene_meta, nodes_under_instance)
 	_process_materials_recursively(scene)
 	

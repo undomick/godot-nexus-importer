@@ -902,13 +902,11 @@ func _run_reimport_assets() -> void:
 	for dir_path in dirs_to_scan.keys():
 		texture_paths.append_array(_collect_textures_recursive(dir_path))
 	
-	# Add to phased queues: textures first, then materials and glTFs
+	# Add to phased queues: textures first, then glTFs. Materials (.tres) must NOT be reimported -
+	# they are native Godot resources with no importer; reimport_files() would fail with "importer for type ''".
 	for p in texture_paths:
 		if p not in _texture_paths:
 			_texture_paths.append(p)
-	for p in material_paths:
-		if p not in _non_texture_paths:
-			_non_texture_paths.append(p)
 	for p in gltf_paths:
 		if p not in _non_texture_paths:
 			_non_texture_paths.append(p)
@@ -916,7 +914,7 @@ func _run_reimport_assets() -> void:
 		_reimport_phase = 2 if _texture_paths.is_empty() else 1
 	
 	var total = texture_paths.size() + material_paths.size() + gltf_paths.size() + skipped
-	print_rich("[color=cyan]Nexus Reimport:[/color] Queued %d texture(s), %d material(s), %d glTF(s). Skipped %d." % [texture_paths.size(), material_paths.size(), gltf_paths.size(), skipped])
+	print_rich("[color=cyan]Nexus Reimport:[/color] Queued %d texture(s), %d glTF(s). %d material(s) (no reimport). Skipped %d." % [texture_paths.size(), gltf_paths.size(), material_paths.size(), skipped])
 	if total == 0:
 		print_rich("[color=yellow]Nexus Reimport:[/color] No assets in index.")
 
@@ -995,5 +993,5 @@ func _update_tool_menu_items() -> void:
 func _restore_selection(nodes: Array[Node]):
 	var selection = get_editor_interface().get_selection()
 	for node in nodes:
-		if is_instance_valid(node):
+		if is_instance_valid(node) and node.is_inside_tree():
 			selection.add_node(node)
