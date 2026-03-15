@@ -18,11 +18,15 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Extract release notes from CHANGELOG.md
-        id: changelog
-        uses: ffurrer2/extract-release-notes@v3
-        with:
-          changelog_file: CHANGELOG.md
-          release_notes_file: release_notes.md
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # Match exact version ## [X.Y.Z] - $2 avoids regex bracket issues
+          awk -v ver="$VERSION" '
+            $1 == "##" && $2 == "[" ver "]" { found=1; next }
+            found && $1 == "##" && $2 ~ /^\[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          [ -s release_notes.md ] || echo "See CHANGELOG.md" > release_notes.md
 
       - name: Ensure LICENSE in addon folder
         run: cp LICENSE addons/nexus_importer/LICENSE
