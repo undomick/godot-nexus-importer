@@ -17,6 +17,18 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
+      - name: Extract changelog for release
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # Extract section from ## [X.Y.Z] until next ## [ (Keep a Changelog format)
+          awk -v ver="[${VERSION}]" '
+            $0 ~ "^## " ver " " { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          # Fallback if no section found
+          [ -s release_notes.md ] || echo "See CHANGELOG.md for details." > release_notes.md
+
       - name: Ensure LICENSE in addon folder
         run: cp LICENSE addons/nexus_importer/LICENSE
 
@@ -26,7 +38,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release_notes.md
           files: nexus_importer-${{ steps.version.outputs.VERSION }}.zip
-          generate_release_notes: true
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
