@@ -134,15 +134,14 @@ func _post_import(scene: Node) -> Object:
 func _inject_extras_from_gltf(root: Node, gltf_path: String) -> void:
 	## Ensures node extras (NEXUS_NODE_METADATA) are available. Godot 4.4+ imports them to meta;
 	## older versions may not – in that case we read from glTF and inject manually.
-	if gltf_path.is_empty() or not gltf_path.ends_with(".gltf"):
+	if gltf_path.is_empty() or not NexusUtils.is_gltf_container_path(gltf_path):
 		return
-	var file = FileAccess.open(gltf_path, FileAccess.READ)
-	if not file: return
+	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
+	if json_text.is_empty():
+		return
 	var json = JSON.new()
-	if json.parse(file.get_as_text()) != OK:
-		file.close()
+	if json.parse(json_text) != OK:
 		return
-	file.close()
 	var gltf = json.get_data()
 	if gltf == null: return
 	var nodes = gltf.get("nodes", [])

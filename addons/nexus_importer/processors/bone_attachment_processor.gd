@@ -125,21 +125,6 @@ func process(node: Node3D, meta: Dictionary, root: Node) -> bool:
 	return true
 
 
-## Extracts JSON from .glb file (first chunk, type 0x4E4F534A). Returns empty string on failure.
-func _extract_json_from_glb(file: FileAccess) -> String:
-	if file.get_position() != 0:
-		file.seek(0)
-	file.get_buffer(12)  # magic, version, total length
-	if file.get_length() < 20:
-		return ""
-	var chunk_len = file.get_32()
-	var chunk_type = file.get_32()
-	if chunk_type != 0x4E4F534A:  # JSON
-		return ""
-	var data = file.get_buffer(chunk_len)
-	return data.get_string_from_utf8()
-
-
 ## Reads glTF JSON and returns the world transform of the node with nexus_bone_attachment.
 ## Returns null if file cannot be read or node not found.
 ## When ignore_scale is true, the target node's scale is treated as 1 (position+rotation only).
@@ -149,15 +134,7 @@ func _get_node_world_transform_from_gltf(gltf_path: String, node_name: String, m
 		return null
 	if not FileAccess.file_exists(gltf_path):
 		return null
-	var file = FileAccess.open(gltf_path, FileAccess.READ)
-	if not file:
-		return null
-	var json_text: String
-	if gltf_path.ends_with(".glb"):
-		json_text = _extract_json_from_glb(file)
-	else:
-		json_text = file.get_as_text()
-	file.close()
+	var json_text: String = NexusUtils.get_gltf_json_text(gltf_path)
 	if json_text.is_empty():
 		return null
 	var json = JSON.new()

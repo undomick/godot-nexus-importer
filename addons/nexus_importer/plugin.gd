@@ -215,7 +215,7 @@ func _on_resources_reimported(resources: PackedStringArray):
 
 	for path in resources:
 		var ext = path.get_extension().to_lower()
-		if ext == "gltf":
+		if ext == "gltf" or ext == "glb":
 			# 1. Config Check - always run so glTFs get Nexus import script (manual + auto)
 			if _check_and_fix_import_config(path, false):
 				if path not in _config_deferred_queue:
@@ -309,7 +309,7 @@ func queue_scene_creation(gltf_path: String, scene_type: String) -> void:
 	if scene_type != SCENE_STYLE_WRAPPER and scene_type != SCENE_STYLE_INHERITED:
 		return
 	if not FileAccess.file_exists(gltf_path):
-		push_warning("Nexus: glTF not found: %s" % gltf_path)
+		push_warning("Nexus: glTF/GLB not found: %s" % gltf_path)
 		return
 	_wrapper_queue[gltf_path] = scene_type
 
@@ -353,7 +353,7 @@ func _collect_gltfs_recursive(folder_path: String) -> Array[String]:
 		var full = folder_path.path_join(name)
 		if dir.current_is_dir():
 			result.append_array(_collect_gltfs_recursive(full))
-		elif name.get_extension().to_lower() == "gltf":
+		elif NexusUtils.is_gltf_container_path(full):
 			result.append(full)
 		name = dir.get_next()
 	dir.list_dir_end()
@@ -762,14 +762,19 @@ func _has_physics_body_recursive(node: Node) -> bool:
 	return false
 
 func _has_custom_lods(gltf_path: String) -> bool:
+	const SEARCH = "nexus_is_lod"
+	if gltf_path.get_extension().to_lower() == "glb":
+		var j := NexusUtils.get_gltf_json_text(gltf_path)
+		return SEARCH in j
 	var file = FileAccess.open(gltf_path, FileAccess.READ)
 	if not file:
 		return false
-	const SEARCH = "nexus_is_lod"
 	while file.get_position() < file.get_length():
 		var line = file.get_line()
 		if SEARCH in line:
+			file.close()
 			return true
+	file.close()
 	return false
 
 ## Returns true if the glTF contains nodes with nexus_mesh_collision_shape RESONANCE_STATIC or RESONANCE_DYNAMIC.
@@ -777,41 +782,24 @@ func _has_custom_lods(gltf_path: String) -> bool:
 func _has_resonance_nodes(gltf_path: String) -> bool:
 	if gltf_path.is_empty():
 		return false
-	if gltf_path.get_extension().to_lower() == "gltf":
-		var file = FileAccess.open(gltf_path, FileAccess.READ)
-		if not file:
-			return false
-		var json = JSON.new()
-		if json.parse(file.get_as_text()) != OK:
-			file.close()
-			return false
-		file.close()
-		var gltf = json.get_data()
-		if gltf == null:
-			return false
-		var nodes = gltf.get("nodes", [])
-		for n in nodes:
-			var extras = n.get("extras", {})
-			var node_meta = extras.get("NEXUS_NODE_METADATA")
-			if node_meta is Dictionary:
-				var shape = node_meta.get("nexus_mesh_collision_shape", "")
-				if shape in ["RESONANCE_STATIC", "RESONANCE_DYNAMIC"]:
-					return true
+	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
+	if json_text.is_empty():
 		return false
-	# .glb: load and check meta or ResonanceGeometry in scene (discard_mesh entries not in meta)
-	var res = ResourceLoader.load(gltf_path)
-	if not res:
+	var json = JSON.new()
+	if json.parse(json_text) != OK:
 		return false
-	var inst = res.instantiate()
-	if not inst:
+	var gltf = json.get_data()
+	if gltf == null:
 		return false
-	if inst.get_meta("nexus_resonance_nodes", []).size() > 0:
-		inst.free()
-		return true
-	var collected: Array[Node] = []
-	_collect_resonance_geometry(inst, collected)
-	inst.free()
-	return collected.size() > 0
+	var nodes = gltf.get("nodes", [])
+	for n in nodes:
+		var extras = n.get("extras", {})
+		var node_meta = extras.get("NEXUS_NODE_METADATA")
+		if node_meta is Dictionary:
+			var shape = node_meta.get("nexus_mesh_collision_shape", "")
+			if shape in ["RESONANCE_STATIC", "RESONANCE_DYNAMIC"]:
+				return true
+	return false
 
 func _get_root_type_string(nexus_type: String) -> String:
 	var map = {
@@ -914,7 +902,7 @@ func _run_reimport_assets() -> void:
 		_reimport_phase = 2 if _texture_paths.is_empty() else 1
 	
 	var total = texture_paths.size() + material_paths.size() + gltf_paths.size() + skipped
-	print_rich("[color=cyan]Nexus Reimport:[/color] Queued %d texture(s), %d glTF(s). %d material(s) (no reimport). Skipped %d." % [texture_paths.size(), gltf_paths.size(), material_paths.size(), skipped])
+	print_rich("[color=cyan]Nexus Reimport:[/color] Queued %d texture(s), %d glTF/GLB. %d material(s) (no reimport). Skipped %d." % [texture_paths.size(), gltf_paths.size(), material_paths.size(), skipped])
 	if total == 0:
 		print_rich("[color=yellow]Nexus Reimport:[/color] No assets in index.")
 
@@ -986,9 +974,9 @@ func _update_tool_menu_items() -> void:
 	_tool_submenu.set_item_tooltip(-1, "Toggle scene creation style. Wrapper = Node3D container with GLTF instance. Inherited = Scene inherits directly from the GLTF.")
 	_tool_submenu.add_separator()
 	_tool_submenu.add_item("Reimport Assets", MENU_ID_REIMPORT_ASSETS)
-	_tool_submenu.set_item_tooltip(-1, "Read asset_index.json and reimport all glTFs that exist at their expected paths. Skips missing assets with a warning.")
+	_tool_submenu.set_item_tooltip(-1, "Read asset_index.json and reimport all glTF/GLB files that exist at their expected paths. Skips missing assets with a warning.")
 	_tool_submenu.add_item("Asset Sanitization", MENU_ID_ASSET_SANITIZATION)
-	_tool_submenu.set_item_tooltip(-1, "Remove asset_index.json entries whose glTF files no longer exist. Cleans orphaned index entries.")
+	_tool_submenu.set_item_tooltip(-1, "Remove asset_index.json entries whose glTF/GLB files no longer exist. Cleans orphaned index entries.")
 
 func _restore_selection(nodes: Array[Node]):
 	var selection = get_editor_interface().get_selection()

@@ -16,7 +16,7 @@ func _popup_menu(paths: PackedStringArray) -> void:
 	var has_gltf = false
 	var has_folder = false
 	for p in paths:
-		if p.get_extension().to_lower() == "gltf":
+		if NexusUtils.is_gltf_container_path(p):
 			has_gltf = true
 		elif DirAccess.dir_exists_absolute(p):
 			has_folder = true
@@ -48,7 +48,7 @@ func _queue_for_scene_type(paths: Array, scene_type: String) -> void:
 		push_warning("Nexus Importer: Context menu plugin could not reach Nexus Importer.")
 		return
 	for p in paths:
-		if p is String and p.get_extension().to_lower() == "gltf":
+		if p is String and NexusUtils.is_gltf_container_path(p):
 			_nexus_plugin.queue_scene_creation(p, scene_type)
 
 func _queue_for_folder_scene_type(paths: Array, scene_type: String) -> void:
