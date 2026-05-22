@@ -23,9 +23,7 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
 	if gltf_path.is_empty():
 		push_warning("Nexus Resonance: No _nexus_gltf_path on root - cannot save mesh sidecar.")
-		if stats.has("resonance"):
-			stats.resonance += 1
-		return true
+		return false
 
 	var mesh_ref = node.mesh
 	var node_name_for_resonance: String = node.name
@@ -37,24 +35,40 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 		short_name = node.name.substr((gltf_basename + "_").length())
 	var base_file = gltf_basename + "_" + NexusUtils.sanitize_node_name(short_name)
 
-	# Use deterministic path and overwrite on reimport. Only use idx for same-name collisions within this import.
-	var paths_used: Array = root.get_meta("nexus_resonance_paths_used", [])
-	var mesh_file = base_file + ".res"
-	var mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
-	var idx = 0
-	while mesh_path in paths_used:
-		idx += 1
-		mesh_file = base_file + "_" + str(idx) + ".res"
-		mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
-	paths_used.append(mesh_path)
-	root.set_meta("nexus_resonance_paths_used", paths_used)
+	const RID_PATH_META := "nexus_resonance_mesh_rid_to_path"
+	var mesh_rid: RID = mesh_ref.get_rid()
+	var rid_valid: bool = mesh_rid.is_valid()
+	var rid_key: String = str(mesh_rid) if rid_valid else ""
+	var rid_to_path: Dictionary = root.get_meta(RID_PATH_META, {})
 
-	var save_err = ResourceSaver.save(mesh_ref, mesh_path)
-	if save_err != OK:
-		push_error("Nexus Resonance: Failed to save mesh sidecar '%s': %s" % [mesh_path, error_string(save_err)])
-		if stats.has("resonance"):
-			stats.resonance += 1
-		return true
+	var mesh_path: String
+	if rid_valid and rid_to_path.has(rid_key):
+		mesh_path = rid_to_path[rid_key]
+	else:
+		# Use deterministic path and overwrite on reimport. idx / RID suffix for same-name, different-mesh collisions.
+		var paths_used: Array = root.get_meta("nexus_resonance_paths_used", [])
+		var mesh_file = base_file + ".res"
+		mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
+		var idx = 0
+		while mesh_path in paths_used:
+			idx += 1
+			if idx == 1:
+				var rid_hex := _mesh_rid_file_suffix(mesh_ref.get_rid())
+				mesh_file = base_file + "_m" + rid_hex + ".res"
+			else:
+				mesh_file = base_file + "_" + str(idx) + ".res"
+			mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))
+		paths_used.append(mesh_path)
+		root.set_meta("nexus_resonance_paths_used", paths_used)
+
+		var save_err = ResourceSaver.save(mesh_ref, mesh_path)
+		if save_err != OK:
+			push_error("Nexus Resonance: Failed to save mesh sidecar '%s': %s" % [mesh_path, error_string(save_err)])
+			return false
+
+		if rid_valid:
+			rid_to_path[rid_key] = mesh_path
+			root.set_meta(RID_PATH_META, rid_to_path)
 
 	# Compute transform in root's local space (avoids get_global_transform when !is_inside_tree)
 	var transform_rel = _get_transform_relative_to_root(root, node)
@@ -87,3 +101,13 @@ func _get_transform_relative_to_root(root: Node, node: Node) -> Transform3D:
 		t = p.transform * t
 		p = p.get_parent()
 	return t
+
+
+## Up to 8 hex chars from RID for stable sidecar names when the base filename collides (different meshes).
+func _mesh_rid_file_suffix(rid: RID) -> String:
+	if not rid.is_valid():
+		return "0"
+	var h := String.num_uint64(rid.get_id(), 16)
+	if h.length() > 8:
+		return h.substr(h.length() - 8, 8)
+	return h

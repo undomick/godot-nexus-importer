@@ -2,6 +2,55 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
+## [Unreleased]
+
+### Godot Addon (nexus_importer)
+
+- Refined importer code structure and shared scene utilities.
+- Fixed wrapper scenes rebuilding on every reimport when already up to date.
+- Fixed animation library extraction keeping the source player when save fails.
+
+## [1.5.0] - 2026-05-19
+
+### Blender Addon (nexus_b2g)
+
+- Added extended material conversion from Blender shader nodes to Godot shaders.
+- Updated mesh optimization to **gltfpack 1.1** (Safe / Compact modes in UI).
+- Re-organized target path and export layout options; settings now persist in addon preferences across `.blend` files.
+- Improved compatibility with third-party glTF export addons (e.g. Anvil Level Design).
+- Minor bug and UI fixes.
+
+### Godot Addon (nexus_importer)
+
+- Import warning when shader materials were exported with an older Blender addon version.
+
+## [1.4.0] - 2026-03-22
+
+### Added
+
+#### Blender Addon (nexus_b2g)
+
+- **Flexible Source / Target paths**: Each of Source and Target can be resolved either **relative to Project Root** (recommended monorepo layout: e.g. `src` / `game`) or as an **absolute** folder on disk. Browse outside Project Root automatically switches the affected side to absolute mode. Preferences JSON export/import is now **version 2** and includes the new fields (older JSON files still import with defaults).
+- **GLB export (experimental)**: **Geometry Container** in Quick Export (persistent addon preference) chooses **glTF Separate** (default: `.gltf` + external buffers/textures, texture organize + optional gltfpack) or **GLB** (single binary file). Asset index validation and manual registration support `.glb`. **gltfpack** is skipped for GLB; `organize_textures` remains a no-op for `.glb`. MultiMesh manifest files stay `.gltf`. Treat as experimental until you have validated your assets end-to-end in Godot.
+
+#### Godot Addon (nexus_importer)
+
+- **GLB support (experimental)**: Reads **NEXUS** metadata from the **JSON chunk** of `.glb` files (same `extras` contract as `.gltf`). Reimport, import config, filesystem context menu, and folder batching treat `**.glb` like `.gltf`**. Prefer regression-testing wrappers, materials, LODs, resonance, and animation libraries after switching formats.
+
+### Changed
+
+#### Blender Addon (nexus_b2g)
+
+- **Project path validation**: Target must exist on disk and resolve correctly; absolute Source requires a valid directory when that mode is selected. **Project Root** remains required for batch export, presets, and related features.
+- **Project Paths UI**: Enum label **“Relative to project root”** (was “Under project root”). For absolute folders, only the native `DIR_PATH` control is shown (no duplicate folder icon next to the custom browse operator).
+
+### Fixed
+
+#### Blender Addon (nexus_b2g)
+
+- **Reference Existing (material)**: `material_index.json` entries were overwritten after export with the default generated `.tres` path, so Godot kept using the wrong resource. The post-pass now only merges `source_blend_file` (and name) and leaves `**relative_path` / `content_hash`** to the material exporter. The material file browser stores `**res://`** paths via the same conversion as typed paths.
+- **Material export skip logic**: When `content_hash` already matched the reference state but `**relative_path` in the index was still wrong** (legacy inconsistency), export skipped and never repaired the index. Skip now requires **hash match and path match** for Reference; for Generate, **hash + path + on-disk `.tres` content** matching a fresh generation (including `nexus_material_id`), so stale or incomplete hashes no longer suppress needed writes.
+
 ## [1.3.1] - 2026-03-15
 
 ### Fixed

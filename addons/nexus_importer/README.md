@@ -29,6 +29,16 @@ Under `nexus/import/`:
 - **asset_index.json**: Tracks exported assets (paths, hashes). Required for placeholders and reimport.
 - **material_index.json**: Tracks shared materials. Do not delete; Nexus uses it for material swapping.
 
+## Shader includes (`shader_inc/`)
+
+Converted materials may `#include` shared GLSL from `res://addons/nexus_importer/shader_inc/` (map range, procedural hash, Voronoi/Noise slices per feature and dimension, simple procedural textures, radial tiling, etc.). After updating the Nexus Blender addon, refresh these files:
+
+```bash
+python path/to/nexus_b2g/shader_convert/tools/sync_shader_includes.py --godot-root /path/to/godot/project
+```
+
+Export fails with a missing-include error if `shader_inc` is out of date relative to the Blender addon version.
+
 ## Troubleshooting
 
 - **Imports look like plain glTF**: Ensure the glTF was exported from Blender with Nexus (Nexus Export sidebar). Check that Import Mode is Auto or run Reimport Assets manually.

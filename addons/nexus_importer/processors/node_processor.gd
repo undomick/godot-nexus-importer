@@ -22,18 +22,12 @@ func _process_shadow_casting(node: GeometryInstance3D, meta: Dictionary):
 		node.cast_shadow = shadow_mode
 
 func _process_gi_mode(node: GeometryInstance3D, node_meta: Dictionary, scene_meta: Dictionary):
-	# 1. FILTER: Shadow Proxies never need Global Illumination
 	if node_meta.get("nexus_is_shadow_proxy", false):
 		node.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 		return
 
-	# 2. Apply Global Scene Setting
 	if scene_meta.has("nexus_light_bake_mode"):
 		var mode = scene_meta["nexus_light_bake_mode"]
-		# 1 = Static (Lightmaps/VoxelGI static)
-		# 0 = Dynamic (Characters, Physics)
-		
-		if mode == 1:
-			node.gi_mode = GeometryInstance3D.GI_MODE_STATIC
-		else:
-			node.gi_mode = GeometryInstance3D.GI_MODE_DYNAMIC
+		node.gi_mode = (
+			GeometryInstance3D.GI_MODE_STATIC if mode == 1 else GeometryInstance3D.GI_MODE_DYNAMIC
+		)

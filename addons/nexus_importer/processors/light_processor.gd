@@ -23,29 +23,19 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	new_light.name = node.name
 	new_light.transform = node.transform
 
-	# --- Color Constructor ---
-	# JSON arrays cannot be passed directly to Color(). We must unpack them.
 	var c_arr = light_data.get("color", [1.0, 1.0, 1.0])
-	# Safety check for array size
 	if c_arr is Array and c_arr.size() >= 3:
 		new_light.light_color = Color(c_arr[0], c_arr[1], c_arr[2])
 	else:
 		new_light.light_color = Color.WHITE
 
-	# --- Energy Conversion ---
-	# Blender uses Watts (Radiant Flux). Godot uses an arbitrary Energy unit (default 1.0).
-	# A pragmatic conversion: 100 Watt (Bulb) ~= 1.0 Godot Energy.
-	# 1000 Watt (Blender default) -> 10.0 Godot Energy.
-	const BLENDER_WATTS_TO_GODOT = 0.01 
-	
+	# Blender radiant flux (W) to Godot energy: ~100 W ~= 1.0 energy.
+	const BLENDER_WATTS_TO_GODOT = 0.01
 	var raw_energy = light_data.get("energy", 1000.0)
 	new_light.light_energy = raw_energy * BLENDER_WATTS_TO_GODOT
-	
-	# Optional: Clamp for Sun lights to prevent blinding white screens
 	if new_light is DirectionalLight3D:
 		new_light.light_energy = min(new_light.light_energy, 5.0)
 
-	# --- Other Parameters ---
 	new_light.shadow_enabled = light_data.get("use_shadow", false)
 	new_light.shadow_bias = light_data.get("shadow_bias", 0.05) # Adjusted default bias
 	new_light.shadow_blur = light_data.get("shadow_blur", 1.0)
