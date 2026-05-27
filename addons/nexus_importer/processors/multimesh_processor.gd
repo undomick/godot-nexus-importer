@@ -89,19 +89,10 @@ func _resolve_source_scene_path(entry: Dictionary, source_asset_id: String) -> S
 		push_error("Nexus MultiMesh: Invalid path in index for Asset ID '%s'." % source_asset_id)
 		return ""
 
-	var base_no_ext = base_gltf_path.get_basename()
-	var editable_scene_path = base_no_ext + "_editable.tscn"
-	var standard_tscn_path = base_no_ext + ".tscn"
-
-	if ResourceLoader.exists(editable_scene_path):
-		return editable_scene_path
-	if ResourceLoader.exists(standard_tscn_path):
-		return standard_tscn_path
-	if ResourceLoader.exists(base_gltf_path):
-		return base_gltf_path
-
-	push_error("Nexus MultiMesh: Source file not found for ID %s." % source_asset_id)
-	return ""
+	var resolved := NexusSceneUtils.resolve_packed_scene_path(base_gltf_path)
+	if resolved.is_empty():
+		push_error("Nexus MultiMesh: Source file not found for ID %s." % source_asset_id)
+	return resolved
 
 
 func _load_source_mesh(source_scene_path: String) -> Dictionary:
@@ -124,24 +115,20 @@ func _build_multimesh_resource(
 	transforms: Array,
 	colors: Variant
 ) -> MultiMesh:
-	# Always create fresh to avoid Godot bug #95617/#106950 (wrong deserialize order on load).
 	var res_filename = gltf_path.get_file().get_basename() + ".multimesh.res"
 	var res_path = gltf_path.get_base_dir().path_join(res_filename)
-	var multimesh_res := MultiMesh.new()
-	multimesh_res.instance_count = 0
-
-	if multimesh_res.transform_format != MultiMesh.TRANSFORM_3D:
-		multimesh_res.transform_format = MultiMesh.TRANSFORM_3D
-	if multimesh_res.use_custom_data:
-		multimesh_res.use_custom_data = false
-	if multimesh_res.mesh != source_mesh:
-		multimesh_res.mesh = source_mesh
-
 	var has_colors = colors != null and colors.size() == transforms.size()
-	if multimesh_res.use_colors != has_colors:
-		multimesh_res.use_colors = has_colors
 
+	if FileAccess.file_exists(res_path):
+		DirAccess.remove_absolute(res_path)
+
+	var multimesh_res := MultiMesh.new()
+	multimesh_res.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh_res.use_custom_data = false
+	multimesh_res.use_colors = has_colors
+	multimesh_res.mesh = source_mesh
 	multimesh_res.instance_count = transforms.size()
+
 	for i in range(transforms.size()):
 		var t_data = transforms[i]
 		if not t_data is Dictionary:

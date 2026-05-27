@@ -3,6 +3,8 @@ extends RefCounted
 
 ## Wrapper and inherited scene creation from imported glTF assets.
 
+const NexusBatchLock = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
+
 const SCENE_LOAD_WAIT_FRAMES = 3
 
 var _plugin: EditorPlugin
@@ -25,6 +27,9 @@ func has_pending() -> bool:
 
 func queue_scene(gltf_path: String, scene_type: String = "") -> void:
 	if gltf_path.is_empty() or _queue.has(gltf_path):
+		return
+	if NexusBatchLock.is_active():
+		NexusBatchLock.defer_path(gltf_path)
 		return
 	if scene_type.is_empty():
 		scene_type = NexusPaths.scene_style()

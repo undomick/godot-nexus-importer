@@ -6,6 +6,7 @@ extends EditorPlugin
 const NexusReimportManagerScript = preload("res://addons/nexus_importer/editor/nexus_reimport_manager.gd")
 const NexusWrapperBuilderScript = preload("res://addons/nexus_importer/editor/nexus_wrapper_builder.gd")
 const NexusAssetToolsScript = preload("res://addons/nexus_importer/editor/nexus_asset_tools.gd")
+const NexusBatchLockScript = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
 
 const MENU_ID_IMPORT_MODE = 0
 const MENU_ID_SCENE_STYLE = 1
@@ -19,6 +20,7 @@ var _reimport_manager: NexusReimportManager
 var _wrapper_builder: NexusWrapperBuilder
 var _asset_tools: NexusAssetTools
 var _scan_needed: bool = false
+var _batch_lock_was_active: bool = false
 
 
 func _enter_tree():
@@ -32,6 +34,7 @@ func _enter_tree():
 	_reimport_manager = NexusReimportManagerScript.new(self)
 	_wrapper_builder = NexusWrapperBuilderScript.new(self)
 	_asset_tools = NexusAssetToolsScript.new(_reimport_manager)
+	set_process(true)
 
 	_register_project_settings()
 
@@ -47,6 +50,7 @@ func _enter_tree():
 
 
 func _exit_tree():
+	set_process(false)
 	if _fs_context_plugin:
 		remove_context_menu_plugin(_fs_context_plugin)
 		_fs_context_plugin = null
@@ -60,8 +64,24 @@ func _exit_tree():
 	if fs.resources_reimporting.is_connected(_on_resources_reimporting):
 		fs.resources_reimporting.disconnect(_on_resources_reimporting)
 
+	_reimport_manager = null
+	_wrapper_builder = null
+	_asset_tools = null
+
 
 func _process(_delta):
+	if _reimport_manager == null or _wrapper_builder == null:
+		return
+
+	var batch_locked := NexusBatchLockScript.is_active()
+	if batch_locked:
+		_batch_lock_was_active = true
+		return
+
+	if _batch_lock_was_active:
+		_batch_lock_was_active = false
+		_flush_batch_deferred_imports()
+
 	if _reimport_manager.cooldown_remaining > 0:
 		_reimport_manager.cooldown_remaining -= 1
 		return
@@ -78,6 +98,12 @@ func _process(_delta):
 		if _wrapper_builder.scan_when_idle:
 			_wrapper_builder.scan_when_idle = false
 			_scan_needed = true
+			var dependent_count := _reimport_manager.queue_dependent_gltfs_from_index()
+			if dependent_count > 0:
+				print_rich(
+					"[color=cyan]Nexus:[/color] Queued %d dependent glTF(s) for reimport after wrapper creation."
+					% dependent_count
+				)
 		return
 
 	if _scan_needed:
@@ -86,10 +112,14 @@ func _process(_delta):
 
 
 func _on_resources_reimporting(_resources: PackedStringArray):
+	if _reimport_manager == null:
+		return
 	_reimport_manager.on_resources_reimporting(_resources)
 
 
 func _on_resources_reimported(resources: PackedStringArray):
+	if _reimport_manager == null or _wrapper_builder == null:
+		return
 	if _reimport_manager.on_resources_reimported(
 		resources,
 		_wrapper_builder,
@@ -99,10 +129,14 @@ func _on_resources_reimported(resources: PackedStringArray):
 
 
 func _nexus_apply_deferred_config_writes():
+	if _reimport_manager == null:
+		return
 	_reimport_manager.apply_deferred_config_writes()
 
 
 func _nexus_flush_pending_reimport_queue(just_reimported: Array):
+	if _reimport_manager == null:
+		return
 	_reimport_manager.flush_pending_reimport_queue(just_reimported)
 
 
@@ -111,6 +145,24 @@ func _nexus_restore_selection(nodes: Array[Node]):
 	for node in nodes:
 		if is_instance_valid(node) and node.is_inside_tree():
 			selection.add_node(node)
+
+
+func _flush_batch_deferred_imports() -> void:
+	if _reimport_manager == null:
+		return
+	if not NexusBatchLockScript.has_deferred_paths():
+		return
+	var phased: Dictionary = NexusBatchLockScript.take_deferred_phased()
+	var textures: Array = phased.get("textures", [])
+	var gltfs: Array = phased.get("gltfs", [])
+	if textures.is_empty() and gltfs.is_empty():
+		return
+	print_rich(
+		"[color=cyan]Nexus:[/color] Batch export finished; reimporting %d deferred resource(s)."
+		% (textures.size() + gltfs.size())
+	)
+	_reimport_manager.queue_phased_paths(textures, gltfs)
+	_scan_needed = true
 
 
 func _show_nexus_notification(message: String, severity: int = 0) -> void:

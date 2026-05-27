@@ -1,9 +1,9 @@
 @tool
 extends Object
 
-## Creates ResonanceGeometry from nexus_mesh_collision_shape. Uses Sidecar approach: mesh is saved
-## to .res, MeshInstance3D is removed. ResonanceGeometry is created later when building wrapper or
-## inherited scene from nexus_resonance_nodes metadata. GLTF is always interpreted the same.
+## Creates ResonanceGeometry from nexus_mesh_collision_shape. Saves mesh sidecars to .res and
+## optionally removes the glTF MeshInstance3D when discard_mesh is set. ResonanceGeometry nodes
+## are attached when building wrapper or inherited scenes from nexus_resonance_nodes metadata.
 
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: Node, stats: Dictionary) -> bool:
 	var shape_type = node_meta.get("nexus_mesh_collision_shape", "")
@@ -19,7 +19,7 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 
 	var discard_mesh = node_meta.get("discard_mesh", false) or node_meta.get("nexus_discard_mesh", false)
 	var material_path: String = node_meta.get("nexus_resonance_material_path", "")
-	# Always use Sidecar: mesh to .res, remove MeshInstance3D, store metadata
+	# Sidecar mesh for ResonanceGeometry; drop the glTF MeshInstance3D only when explicitly requested.
 	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
 	if gltf_path.is_empty():
 		push_warning("Nexus Resonance: No _nexus_gltf_path on root - cannot save mesh sidecar.")
@@ -70,12 +70,12 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 			rid_to_path[rid_key] = mesh_path
 			root.set_meta(RID_PATH_META, rid_to_path)
 
-	# Compute transform in root's local space (avoids get_global_transform when !is_inside_tree)
 	var transform_rel = _get_transform_relative_to_root(root, node)
 	var transform_str = var_to_str(transform_rel)
 
-	parent.remove_child(node)
-	node.free()
+	if discard_mesh:
+		parent.remove_child(node)
+		node.free()
 
 	var nodes_array: Array = root.get_meta("nexus_resonance_nodes", [])
 	nodes_array.append({

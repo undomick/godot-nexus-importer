@@ -2,15 +2,7 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
-## [Unreleased]
-
-### Godot Addon (nexus_importer)
-
-- Refined importer code structure and shared scene utilities.
-- Fixed wrapper scenes rebuilding on every reimport when already up to date.
-- Fixed animation library extraction keeping the source player when save fails.
-
-## [1.5.0] - 2026-05-19
+## [1.5.0] - 2026-05-27
 
 ### Blender Addon (nexus_b2g)
 

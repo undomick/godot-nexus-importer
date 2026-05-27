@@ -1,18 +1,24 @@
 class_name NexusReimportManager
 extends RefCounted
 
+const NexusBatchLock = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
+
 ## Phased reimport queues, import-config fixups, and signal-based flush logic.
 
 const REIMPORT_DELAY = 2
 const FLUSH_FALLBACK_TIMEOUT = 2.5
 const SAFETY_FRAMES = 15
 
+const PHASE_IDLE = 0
+const PHASE_TEXTURES = 1
+const PHASE_GLTF = 2
+
 var cooldown_remaining: int = 0
 
 var _plugin: EditorPlugin
 var _texture_paths: Array[String] = []
 var _non_texture_paths: Array[String] = []
-var _reimport_phase: int = 0
+var _reimport_phase: int = PHASE_IDLE
 var _reimport_pending: bool = false
 var _pending_reimport_after_signal: Dictionary = {}
 var _pending_flush_ready: bool = false
@@ -33,21 +39,26 @@ func has_pending_paths() -> bool:
 
 
 func tick_phased_reimport() -> bool:
-	if not _reimport_pending and _reimport_phase > 0:
+	if not _reimport_pending and _reimport_phase > PHASE_IDLE:
 		_reimport_pending = true
-		if _reimport_phase == 1 and not _texture_paths.is_empty():
-			_reimport_safe_async_batch(_texture_paths.duplicate())
-			_texture_paths.clear()
-		elif _reimport_phase == 2 and not _non_texture_paths.is_empty():
-			_reimport_safe_async_batch(_non_texture_paths.duplicate())
-			_non_texture_paths.clear()
-		else:
-			_reimport_phase = 0
-			_reimport_pending = false
+		match _reimport_phase:
+			PHASE_TEXTURES:
+				if not _texture_paths.is_empty():
+					_reimport_safe_async_batch(_texture_paths.duplicate())
+					_texture_paths.clear()
+				else:
+					_advance_reimport_phase()
+			PHASE_GLTF:
+				if not _non_texture_paths.is_empty():
+					_reimport_safe_async_batch(_non_texture_paths.duplicate())
+					_non_texture_paths.clear()
+				else:
+					_reimport_phase = PHASE_IDLE
+					_reimport_pending = false
 		return true
 	if has_pending_paths():
-		if _reimport_phase == 0:
-			_reimport_phase = 2 if _texture_paths.is_empty() else 1
+		if _reimport_phase == PHASE_IDLE:
+			_reimport_phase = _initial_reimport_phase()
 		return true
 	return false
 
@@ -61,6 +72,11 @@ func on_resources_reimported(
 	wrapper_builder: NexusWrapperBuilder,
 	on_scan_needed: Callable
 ) -> bool:
+	if NexusBatchLock.is_active():
+		for path in resources:
+			NexusBatchLock.defer_path(path)
+		return false
+
 	_reimport_in_progress = false
 	_reimport_pending = false
 
@@ -95,30 +111,77 @@ func on_resources_reimported(
 
 
 func queue_paths(paths: Array) -> void:
+	if NexusBatchLock.is_active():
+		NexusBatchLock.defer_paths(paths)
+		return
 	for p in paths:
 		if p is String:
-			if _is_texture_path(p):
-				if p not in _texture_paths:
-					_texture_paths.append(p)
-			else:
-				if p not in _non_texture_paths:
-					_non_texture_paths.append(p)
-	if _reimport_phase == 0:
-		_reimport_phase = 2 if _texture_paths.is_empty() else 1
+			_route_path_to_queue(p)
+	if _reimport_phase == PHASE_IDLE:
+		_reimport_phase = _initial_reimport_phase()
 
 
 func queue_phased_paths(texture_paths: Array, gltf_paths: Array) -> void:
+	if NexusBatchLock.is_active():
+		NexusBatchLock.defer_paths(texture_paths)
+		NexusBatchLock.defer_paths(gltf_paths)
+		return
 	for p in texture_paths:
 		if p is String and p not in _texture_paths:
 			_texture_paths.append(p)
 	for p in gltf_paths:
 		if p is String and p not in _non_texture_paths:
 			_non_texture_paths.append(p)
-	if _reimport_phase == 0:
-		_reimport_phase = 2 if _texture_paths.is_empty() else 1
+	if _reimport_phase == PHASE_IDLE:
+		_reimport_phase = _initial_reimport_phase()
+
+
+func queue_dependent_gltfs_from_index() -> int:
+	var asset_index_path := NexusPaths.asset_index_path()
+	if not FileAccess.file_exists(asset_index_path):
+		return 0
+
+	var file = FileAccess.open(asset_index_path, FileAccess.READ)
+	if not file:
+		return 0
+	var json = JSON.new()
+	if json.parse(file.get_as_text()) != OK:
+		file.close()
+		return 0
+	var asset_index = json.get_data()
+	file.close()
+	if not asset_index is Dictionary:
+		return 0
+
+	var queued := 0
+	for asset_id in asset_index.keys():
+		var entry = asset_index[asset_id]
+		if not entry is Dictionary:
+			continue
+		var rel_path: String = entry.get("relative_path", "")
+		if rel_path.is_empty():
+			continue
+		var gltf_path := NexusUtils.validate_index_path(rel_path)
+		if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
+			continue
+		var meta := NexusUtils.get_nexus_metadata(gltf_path)
+		var export_type: String = meta.get("export_type", "")
+		if export_type not in ["LEVEL", "MULTIMESH_MANIFEST"]:
+			continue
+		if gltf_path in _non_texture_paths:
+			continue
+		_non_texture_paths.append(gltf_path)
+		queued += 1
+
+	if queued > 0 and _reimport_phase == PHASE_IDLE:
+		_reimport_phase = PHASE_GLTF
+	return queued
 
 
 func apply_deferred_config_writes() -> void:
+	if NexusBatchLock.is_active():
+		_plugin.call_deferred("_nexus_apply_deferred_config_writes")
+		return
 	if _config_deferred_queue.is_empty():
 		return
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
@@ -151,14 +214,9 @@ func flush_pending_reimport_queue(just_reimported: Array) -> void:
 		_pending_flush_ready = true
 		return
 	for path in _pending_reimport_after_signal.keys():
-		if _is_texture_path(path):
-			if path not in _texture_paths:
-				_texture_paths.append(path)
-		else:
-			if path not in _non_texture_paths:
-				_non_texture_paths.append(path)
-	if _reimport_phase == 0:
-		_reimport_phase = 2 if _texture_paths.is_empty() else 1
+		_route_path_to_queue(path)
+	if _reimport_phase == PHASE_IDLE:
+		_reimport_phase = _initial_reimport_phase()
 	_pending_reimport_after_signal.clear()
 	_pending_flush_ready = false
 
@@ -225,6 +283,10 @@ func fix_import_config_if_needed(gltf_path: String, do_write: bool = true) -> bo
 
 
 func _reimport_safe_async_batch(paths: Array) -> void:
+	if NexusBatchLock.is_active():
+		NexusBatchLock.defer_paths(paths)
+		_reimport_pending = false
+		return
 	for i in REIMPORT_DELAY:
 		await _plugin.get_tree().process_frame
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
@@ -249,31 +311,57 @@ func _reimport_safe_async_batch(paths: Array) -> void:
 	if not nodes_to_reselect.is_empty():
 		_plugin.call_deferred("_nexus_restore_selection", nodes_to_reselect)
 	cooldown_remaining = SAFETY_FRAMES
-	if _reimport_phase == 1 and not _non_texture_paths.is_empty():
-		_reimport_phase = 2
-	elif _reimport_phase == 2 or _texture_paths.is_empty():
-		_reimport_phase = 0
+	_advance_reimport_phase()
 
 
 func _on_flush_fallback_timeout() -> void:
 	if _pending_reimport_after_signal.is_empty():
 		return
 	for path in _pending_reimport_after_signal.keys():
-		if _is_texture_path(path):
-			if path not in _texture_paths:
-				_texture_paths.append(path)
-		else:
-			if path not in _non_texture_paths:
-				_non_texture_paths.append(path)
-	if _reimport_phase == 0:
-		_reimport_phase = 2 if _texture_paths.is_empty() else 1
+		_route_path_to_queue(path)
+	if _reimport_phase == PHASE_IDLE:
+		_reimport_phase = _initial_reimport_phase()
 	_pending_reimport_after_signal.clear()
 	_pending_flush_ready = false
+
+
+func _route_path_to_queue(path: String) -> void:
+	if _is_texture_path(path):
+		if path not in _texture_paths:
+			_texture_paths.append(path)
+	elif path not in _non_texture_paths:
+		_non_texture_paths.append(path)
+
+
+func _initial_reimport_phase() -> int:
+	if not _texture_paths.is_empty():
+		return PHASE_TEXTURES
+	if not _non_texture_paths.is_empty():
+		return PHASE_GLTF
+	return PHASE_IDLE
+
+
+func _advance_reimport_phase() -> void:
+	match _reimport_phase:
+		PHASE_TEXTURES:
+			if not _non_texture_paths.is_empty():
+				_reimport_phase = PHASE_GLTF
+			else:
+				_reimport_phase = PHASE_IDLE
+				_reimport_pending = false
+		PHASE_GLTF:
+			_reimport_phase = PHASE_IDLE
+			_reimport_pending = false
 
 
 func _is_texture_path(path: String) -> bool:
 	var ext = path.get_extension().to_lower()
 	return ext in ["png", "jpg", "jpeg", "webp"]
+
+
+func _is_gltf_path(path: String) -> bool:
+	var ext = path.get_extension().to_lower()
+	return ext == "gltf" or ext == "glb"
 
 
 func _is_multimesh_manifest(gltf_path: String) -> bool:

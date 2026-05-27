@@ -756,7 +756,7 @@ vec4 nexus_calculate_out_variables_irregular_circular(bool calculate_r_gon_param
   return out_variables;
 }
 
- float nexus_calculate_out_segment_id(float r_gon_sides, vec2 coord)
+float nexus_calculate_out_segment_id(float r_gon_sides, vec2 coord)
 {
   return floor(r_gon_sides *
                 ((atan(coord.y, coord.x) / TAU) + float(coord.y < float(0.0))));

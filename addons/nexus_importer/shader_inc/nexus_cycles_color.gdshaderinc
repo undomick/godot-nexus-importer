@@ -41,24 +41,24 @@ vec3 nexus_hsv_to_rgb(vec3 hsv) {
 		h = 0.0;
 	}
 	h *= 6.0;
-	float i = floor(h);
-	float f = h - i;
+	float sector = floor(h);
+	float f = h - sector;
 	float p = v * (1.0 - s);
 	float q = v * (1.0 - s * f);
 	float t = v * (1.0 - s * (1.0 - f));
-	if (i == 0) {
+	if (sector == 0.0) {
 		return vec3(v, t, p);
 	}
-	if (i == 1) {
+	if (sector == 1.0) {
 		return vec3(q, v, p);
 	}
-	if (i == 2) {
+	if (sector == 2.0) {
 		return vec3(p, v, t);
 	}
-	if (i == 3) {
+	if (sector == 3.0) {
 		return vec3(p, q, v);
 	}
-	if (i == 4) {
+	if (sector == 4.0) {
 		return vec3(t, p, v);
 	}
 	return vec3(v, p, q);

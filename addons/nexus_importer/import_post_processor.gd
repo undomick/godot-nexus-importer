@@ -7,6 +7,7 @@ const NEXUS_ASSET_META = "NEXUS_ASSET_METADATA"
 const NEXUS_NODE_META = "NEXUS_NODE_METADATA"
 
 const AnimationProcessor = preload("res://addons/nexus_importer/processors/animation_processor.gd")
+const NexusBatchLock = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
 const BoneAttachmentProcessor = preload("res://addons/nexus_importer/processors/bone_attachment_processor.gd")
 const CollisionProcessor = preload("res://addons/nexus_importer/processors/collision_processor.gd")
 const ResonanceProcessor = preload("res://addons/nexus_importer/processors/resonance_processor.gd")
@@ -59,6 +60,10 @@ func _post_import(scene: Node) -> Object:
 	var gltf_path = get_source_file()
 	var scene_meta = NexusUtils.get_nexus_metadata(gltf_path)
 	if scene_meta.is_empty():
+		return scene
+
+	if NexusBatchLock.is_active():
+		NexusBatchLock.defer_path(gltf_path)
 		return scene
 
 	var export_type = scene_meta.get("export_type", "UNKNOWN")
@@ -131,13 +136,7 @@ func _process_scene_tree(
 
 	if export_type in ["ASSET", "SKELETAL_ASSET"]:
 		lod_processor.process(scene, stats)
-
-	if stats.lods > 0:
-		var applicator = Node.new()
-		applicator.name = "NexusLodDeferred"
-		applicator.set_script(load("res://addons/nexus_importer/runtime/nexus_lod_deferred.gd"))
-		scene.add_child(applicator)
-		applicator.owner = scene
+		_remove_legacy_lod_deferred_nodes(scene)
 
 
 func _extract_animations_if_needed(
@@ -158,6 +157,12 @@ func _log_import_summary(name: String, export_type: String, root_type: String, m
 	_print_compact_summary(name, export_type, root_type, meta)
 
 
+const NEXUS_NODE_EXTRA_MERGE_KEYS := [
+	"nexus_visibility_range",
+	"nexus_bone_attachment",
+]
+
+
 func _inject_extras_from_gltf(root: Node, gltf_path: String) -> void:
 	## Godot 4.4+ imports glTF extras to node meta; older versions may not.
 	if gltf_path.is_empty() or not NexusUtils.is_gltf_container_path(gltf_path):
@@ -175,22 +180,45 @@ func _inject_extras_from_gltf(root: Node, gltf_path: String) -> void:
 	var name_to_extras: Dictionary = {}
 	for n in nodes:
 		var extras = n.get("extras", {})
-		var node_meta = extras.get("NEXUS_NODE_METADATA")
-		if node_meta:
-			var nm = n.get("name", "")
-			if not nm.is_empty():
-				name_to_extras[nm] = extras
+		if not extras is Dictionary or extras.is_empty():
+			continue
+		var nm = n.get("name", "")
+		if nm.is_empty():
+			continue
+		if extras.has("NEXUS_NODE_METADATA") or extras.has("nexus_visibility_range"):
+			name_to_extras[nm] = extras
 	if name_to_extras.is_empty():
 		return
 	var stack: Array = [root]
 	while not stack.is_empty():
 		var nd = stack.pop_back()
 		if nd.name in name_to_extras:
-			var existing = nd.get_meta("extras", {})
-			if not (existing is Dictionary) or not existing.has("NEXUS_NODE_METADATA"):
-				nd.set_meta("extras", name_to_extras[nd.name])
+			var from_gltf: Dictionary = name_to_extras[nd.name]
+			var existing: Dictionary = nd.get_meta("extras", {}) if nd.has_meta("extras") else {}
+			if not existing is Dictionary:
+				existing = {}
+			var merged := existing.duplicate(true)
+			if not merged.has("NEXUS_NODE_METADATA") and from_gltf.has("NEXUS_NODE_METADATA"):
+				merged["NEXUS_NODE_METADATA"] = from_gltf["NEXUS_NODE_METADATA"]
+			for key in NEXUS_NODE_EXTRA_MERGE_KEYS:
+				if from_gltf.has(key):
+					merged[key] = from_gltf[key]
+			nd.set_meta("extras", merged)
 		for i in range(nd.get_child_count() - 1, -1, -1):
 			stack.append(nd.get_child(i))
+
+
+func _remove_legacy_lod_deferred_nodes(root: Node) -> void:
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		for i in range(node.get_child_count() - 1, -1, -1):
+			var child = node.get_child(i)
+			if child.name == "NexusLodDeferred" and child.get_script() != null:
+				node.remove_child(child)
+				child.free()
+			else:
+				stack.append(child)
 
 
 func _collect_nodes_under_instance(root: Node) -> Dictionary:

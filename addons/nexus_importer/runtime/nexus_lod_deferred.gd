@@ -1,9 +1,7 @@
 extends Node
 
-## Applies nexus_visibility_range from node meta after one frame.
-## Avoids "data.tree is null" when opening scenes at editor startup:
-## GeometryInstance3D visibility_range setters can call get_tree() before the node is in the tree.
-## Stored in meta during import; applied here when the scene tree is ready.
+## Legacy fallback for glTF imports created before visibility ranges were baked at import time.
+## New imports set GeometryInstance3D.visibility_range_* directly and do not add this node.
 
 const FADE_MODE = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 

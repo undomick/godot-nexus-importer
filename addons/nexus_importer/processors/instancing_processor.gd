@@ -3,34 +3,31 @@ extends Object
 
 ## Replaces placeholder nodes with instanced scenes from asset_index or nexus_placeholder_path.
 
+const PENDING_INSTANCES_META := "_nexus_pending_instances"
+
 var _asset_index_cache: Dictionary = {}
 var _asset_index_loaded: bool = false
+var _warned_missing_paths: Dictionary = {}
 
 
 func process(node: Node, meta: Dictionary, root: Node) -> bool:
-	var scene_path := ""
+	var requested_path := ""
 	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
 	var gltf_context: String = (" (in glTF: %s)" % gltf_path) if not gltf_path.is_empty() else ""
 
 	if meta.has("nexus_placeholder_path"):
-		scene_path = meta["nexus_placeholder_path"]
+		requested_path = meta["nexus_placeholder_path"]
 	elif meta.has("nexus_asset_id"):
-		scene_path = _resolve_scene_path_from_asset_id(meta["nexus_asset_id"], root, gltf_context)
-		if scene_path.is_empty():
+		requested_path = _resolve_scene_path_from_asset_id(meta["nexus_asset_id"], root, gltf_context)
+		if requested_path.is_empty():
 			return false
 
-	if scene_path.is_empty():
+	if requested_path.is_empty():
 		return false
 
-	if not ResourceLoader.exists(scene_path):
-		var asset_ref: String = (
-			" Referenced by asset ID '%s'." % meta.get("nexus_asset_id", "")
-			if meta.has("nexus_asset_id")
-			else ""
-		)
-		push_error(
-			"Nexus Instancer: Target scene not found at '%s'.%s%s" % [scene_path, asset_ref, gltf_context]
-		)
+	var scene_path := NexusSceneUtils.resolve_packed_scene_path(requested_path)
+	if scene_path.is_empty():
+		_mark_pending_instance(root, node, requested_path, meta, gltf_context)
 		return false
 
 	var packed_scene = load(scene_path)
@@ -55,6 +52,37 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 
 	print_verbose("Nexus Instancer: Replaced '%s' with instance of '%s'." % [instance.name, scene_path.get_file()])
 	return true
+
+
+func _mark_pending_instance(
+	root: Node,
+	node: Node,
+	requested_path: String,
+	meta: Dictionary,
+	gltf_context: String
+) -> void:
+	var pending = root.get_meta(PENDING_INSTANCES_META, [])
+	if not pending is Array:
+		pending = []
+	pending.append({
+		"requested_path": requested_path,
+		"node_name": node.name,
+		"asset_id": meta.get("nexus_asset_id", ""),
+	})
+	root.set_meta(PENDING_INSTANCES_META, pending)
+
+	var asset_ref: String = (
+		" Referenced by asset ID '%s'." % meta.get("nexus_asset_id", "")
+		if meta.has("nexus_asset_id")
+		else ""
+	)
+	if _warned_missing_paths.has(requested_path):
+		return
+	_warned_missing_paths[requested_path] = true
+	push_warning(
+		"Nexus Instancer: Target scene not found at '%s'.%s%s Placeholder kept; will retry on reimport."
+		% [requested_path, asset_ref, gltf_context]
+	)
 
 
 func _load_asset_index() -> Dictionary:
@@ -95,20 +123,4 @@ func _resolve_scene_path_from_asset_id(asset_id: String, root: Node, gltf_contex
 		push_error("Nexus Instancer: Invalid path in index for Asset ID '%s'.%s" % [asset_id, gltf_context])
 		return ""
 
-	var parent_export_type = root.get_meta("_nexus_export_type", "")
-	if parent_export_type == "LEVEL":
-		if ResourceLoader.exists(NexusPaths.wrapper_path_for(base_gltf_path)):
-			return NexusPaths.wrapper_path_for(base_gltf_path)
-		if ResourceLoader.exists(NexusPaths.inherited_path_for(base_gltf_path)):
-			return NexusPaths.inherited_path_for(base_gltf_path)
-		return base_gltf_path
-
-	var base = base_gltf_path.get_basename()
-	var editable_scene_path = base + "_editable.tscn"
-	if ResourceLoader.exists(editable_scene_path):
-		return editable_scene_path
-	if ResourceLoader.exists(NexusPaths.wrapper_path_for(base_gltf_path)):
-		return NexusPaths.wrapper_path_for(base_gltf_path)
-	if ResourceLoader.exists(NexusPaths.inherited_path_for(base_gltf_path)):
-		return NexusPaths.inherited_path_for(base_gltf_path)
 	return base_gltf_path
