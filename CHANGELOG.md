@@ -9,7 +9,7 @@ All notable changes to the Nexus Pipeline (Blender → Godot) are documented her
 - Added extended material conversion from Blender shader nodes to Godot shaders.
 - Updated mesh optimization to **gltfpack 1.1** (Safe / Compact modes in UI).
 - Re-organized target path and export layout options; settings now persist in addon preferences across `.blend` files.
-- Improved compatibility with third-party glTF export addons (e.g. Anvil Level Design).
+- Improved compatibility with third-party glTF export addons.
 - Minor bug and UI fixes.
 
 ### Godot Addon (nexus_importer)
