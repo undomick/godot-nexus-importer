@@ -7,22 +7,35 @@ extends Object
 const EXPECTED_SHADER_CONVERT_VERSION := 5
 
 var _material_index: Dictionary = {}
-var _index_loaded: bool = false
+var _index_mtime: int = -1
 var _warned_versions: Dictionary = {}
 
 func _load_material_index() -> bool:
 	var path = NexusPaths.material_index_path()
+	if not FileAccess.file_exists(path):
+		_index_mtime = -1
+		_material_index = {}
+		return false
+
+	var mtime := FileAccess.get_modified_time(path)
+	if mtime == _index_mtime and not _material_index.is_empty():
+		return true
+
 	var file = FileAccess.open(path, FileAccess.READ)
 	if not file:
-		_index_loaded = true
+		_index_mtime = -1
+		_material_index = {}
 		return false
 
 	var json = JSON.new()
 	if json.parse(file.get_as_text()) == OK:
 		_material_index = json.get_data()
+		_index_mtime = mtime
+	else:
+		_index_mtime = -1
+		_material_index = {}
 	file.close()
 
-	_index_loaded = true
 	return not _material_index.is_empty()
 
 func process(node: Node, stats: Dictionary) -> void:

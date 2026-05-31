@@ -2,6 +2,16 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
+## [1.5.1] - 2026-05-31
+
+### Blender Addon (nexus_b2g)
+
+- Fixed level export duplicating asset textures and breaking shared materials in Godot.
+
+### Godot Addon (nexus_importer)
+
+- Importer reloads `material_index.json` when the file changes, so material updates apply without restarting the editor.
+
 ## [1.5.0] - 2026-05-27
 
 ### Blender Addon (nexus_b2g)
