@@ -18,7 +18,13 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 		return false
 
 	var discard_mesh = node_meta.get("discard_mesh", false) or node_meta.get("nexus_discard_mesh", false)
-	var material_path: String = node_meta.get("nexus_resonance_material_path", "")
+	var raw_material_path := str(node_meta.get("nexus_resonance_material_path", ""))
+	var material_path := NexusUtils.validate_index_path(raw_material_path)
+	if not raw_material_path.is_empty() and material_path.is_empty():
+		push_warning(
+			"Nexus Resonance: Rejected unsafe material path '%s' on '%s'."
+			% [raw_material_path, node.name]
+		)
 	# Sidecar mesh for ResonanceGeometry; drop the glTF MeshInstance3D only when explicitly requested.
 	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
 	if gltf_path.is_empty():

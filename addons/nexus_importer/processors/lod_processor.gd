@@ -3,6 +3,8 @@ extends Object
 
 ## Applies LOD visibility ranges and shadow proxy linking from nexus metadata.
 
+const NexusVisibilityRange = preload("res://addons/nexus_importer/scripts/nexus_visibility_range.gd")
+
 var _lod_regex: RegEx = RegEx.new()
 
 
@@ -37,7 +39,7 @@ func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary) -> void:
 		var range_data = extras["nexus_visibility_range"]
 		if range_data is Dictionary:
 			_apply_visibility_range(node, range_data)
-			stats.lods += 1
+			stats["lods"] = int(stats.get("lods", 0)) + 1
 
 	var nexus_meta = _get_nexus_node_meta(node)
 	if nexus_meta.get("nexus_is_shadow_proxy", false):
@@ -46,11 +48,7 @@ func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary) -> void:
 
 
 func _apply_visibility_range(node: GeometryInstance3D, range_data: Dictionary) -> void:
-	node.visibility_range_begin = range_data.get("begin", 0.0)
-	node.visibility_range_begin_margin = range_data.get("begin_margin", 0.0)
-	node.visibility_range_end = range_data.get("end", 0.0)
-	node.visibility_range_end_margin = range_data.get("end_margin", 0.0)
-	node.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	NexusVisibilityRange.apply_mesh_lod(node, range_data)
 
 
 func _link_shadow_proxies(parent: Node) -> void:
@@ -109,5 +107,13 @@ func _get_visibility_range_end(node: GeometryInstance3D) -> float:
 
 
 func _update_proxy_range_end(proxy: GeometryInstance3D, mesh: GeometryInstance3D) -> void:
-	proxy.visibility_range_end = mesh.visibility_range_end
-	proxy.visibility_range_end_margin = mesh.visibility_range_end_margin
+	var values := NexusVisibilityRange.sanitize_dict(
+		{
+			"begin": proxy.visibility_range_begin,
+			"begin_margin": proxy.visibility_range_begin_margin,
+			"end": mesh.visibility_range_end,
+			"end_margin": mesh.visibility_range_end_margin,
+		}
+	)
+	proxy.visibility_range_end = values["end"]
+	proxy.visibility_range_end_margin = values["end_margin"]

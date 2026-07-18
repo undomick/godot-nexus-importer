@@ -11,8 +11,31 @@ func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary) -> vo
 	_apply_physics_material(node, meta, stats)
 	_apply_surface_metadata(node, meta, stats)
 	_apply_rigid_body_settings(node, meta)
+	_apply_vehicle_body_settings(node, meta)
 	if node is AnimatableBody3D:
 		node.sync_to_physics = meta.get("animatable_sync_to_physics", false)
+
+
+func ensure_vehicle_body_root(node: Node, meta: Dictionary) -> Node:
+	if meta.get("root_type", "") != "VEHICLE":
+		return node
+	if node is VehicleBody3D:
+		return node
+	if not node is RigidBody3D:
+		push_warning(
+			"Nexus Importer: Expected RigidBody3D root for VEHICLE asset '%s', got %s."
+			% [node.name, node.get_class()]
+		)
+		return node
+
+	var vehicle := VehicleBody3D.new()
+	vehicle.name = node.name
+	vehicle.transform = node.transform
+	var owner = node.owner
+	node.replace_by(vehicle)
+	node.queue_free()
+	vehicle.owner = owner
+	return vehicle
 
 
 func _apply_collision_layers(node: CollisionObject3D, meta: Dictionary) -> void:
@@ -25,8 +48,13 @@ func _apply_collision_layers(node: CollisionObject3D, meta: Dictionary) -> void:
 func _apply_physics_material(node: Node, meta: Dictionary, stats: Dictionary) -> void:
 	if not node is PhysicsBody3D or not meta.has("physics_material_path"):
 		return
-	var mat_path = meta["physics_material_path"]
-	if mat_path.is_empty() or not ResourceLoader.exists(mat_path):
+	var raw_mat_path := str(meta["physics_material_path"])
+	var mat_path := NexusUtils.validate_index_path(raw_mat_path)
+	if mat_path.is_empty():
+		if not raw_mat_path.is_empty():
+			push_warning("Nexus Importer: Rejected unsafe physics_material_path '%s'." % raw_mat_path)
+		return
+	if not ResourceLoader.exists(mat_path):
 		return
 	if not "physics_material_override" in node:
 		return
@@ -67,3 +95,17 @@ func _apply_rigid_body_settings(node: Node, meta: Dictionary) -> void:
 			if mode_str == "KINEMATIC"
 			else RigidBody3D.FREEZE_MODE_STATIC
 		)
+
+
+func _apply_vehicle_body_settings(node: Node, meta: Dictionary) -> void:
+	if not node is VehicleBody3D or not meta.has("vehicle_body_settings"):
+		return
+	var settings = meta["vehicle_body_settings"]
+	if settings.has("brake"):
+		node.brake = float(settings["brake"])
+	if settings.has("engine_force"):
+		node.engine_force = float(settings["engine_force"])
+	if settings.has("steering"):
+		node.steering = float(settings["steering"])
+	if settings.has("mass"):
+		node.mass = float(settings["mass"])

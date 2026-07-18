@@ -3,6 +3,11 @@ extends Object
 
 ## Applies nexus_camera metadata to Camera3D (perspective/orthographic, focal length, DOF).
 
+const MIN_NEAR := 0.01
+const MAX_FAR := 100000.0
+const MAX_FAR_NEAR_RATIO := 100000.0
+
+
 func process(node: Node, node_meta: Dictionary) -> bool:
 	if not node is Camera3D:
 		return false
@@ -13,8 +18,11 @@ func process(node: Node, node_meta: Dictionary) -> bool:
 	var cam_data = node_meta["nexus_camera"]
 
 	node.keep_aspect = cam_data.get("keep_aspect", 0) as Camera3D.KeepAspect
-	node.near = cam_data.get("clip_start", 0.1)
-	node.far = cam_data.get("clip_end", 100.0)
+	node.near = maxf(float(cam_data.get("clip_start", 0.1)), MIN_NEAR)
+	node.far = maxf(float(cam_data.get("clip_end", 100.0)), node.near + MIN_NEAR)
+	if node.far / node.near > MAX_FAR_NEAR_RATIO:
+		node.far = node.near * MAX_FAR_NEAR_RATIO
+	node.far = minf(node.far, MAX_FAR)
 
 	if cam_data.get("camera_type", "PERSPECTIVE") == "ORTHOGRAPHIC":
 		_apply_orthographic(node, cam_data)

@@ -3,6 +3,8 @@ extends RefCounted
 
 ## Asset index loading, bulk reimport, and index sanitization.
 
+const NexusSceneUtils = preload("res://addons/nexus_importer/scripts/nexus_scene_utils.gd")
+
 var _reimport_manager: NexusReimportManager
 
 
@@ -11,25 +13,11 @@ func _init(reimport_manager: NexusReimportManager) -> void:
 
 
 func load_asset_index() -> Dictionary:
-	var asset_index_path = NexusPaths.asset_index_path()
-	if not FileAccess.file_exists(asset_index_path):
-		push_error("Nexus: Asset index not found at '%s'." % asset_index_path)
-		return {}
-	var file = FileAccess.open(asset_index_path, FileAccess.READ)
-	if not file:
-		push_error("Nexus: Could not open asset index.")
-		return {}
-	var json = JSON.new()
-	if json.parse(file.get_as_text()) != OK:
-		file.close()
-		push_error("Nexus: Asset index is not valid JSON.")
-		return {}
-	file.close()
-	var data = json.get_data()
-	if not data is Dictionary:
-		push_error("Nexus: Asset index root must be an object.")
-		return {}
-	return data
+	return NexusUtils.load_index_json(NexusPaths.asset_index_path(), "asset_index.json")
+
+
+func load_material_index() -> Dictionary:
+	return NexusUtils.load_index_json(NexusPaths.material_index_path(), "material_index.json")
 
 
 func reimport_from_index() -> void:
@@ -42,10 +30,6 @@ func reimport_from_index() -> void:
 
 	for asset_id in asset_index.keys():
 		var entry = asset_index[asset_id]
-		if not entry is Dictionary:
-			push_warning("Nexus: Asset '%s' has invalid entry - skipped." % asset_id)
-			skipped += 1
-			continue
 		var rel_path = entry.get("relative_path", "")
 		if rel_path.is_empty():
 			push_warning("Nexus: Asset '%s' has no relative_path - skipped." % asset_id)
@@ -62,23 +46,29 @@ func reimport_from_index() -> void:
 			continue
 		gltf_paths.append(gltf_path)
 
-	var material_index_path = NexusPaths.material_index_path()
-	if FileAccess.file_exists(material_index_path):
-		var file = FileAccess.open(material_index_path, FileAccess.READ)
-		if file:
-			var json = JSON.new()
-			if json.parse(file.get_as_text()) == OK:
-				var mat_data = json.get_data()
-				if mat_data is Dictionary:
-					for mat_id in mat_data.keys():
-						var mat_entry = mat_data[mat_id]
-						if mat_entry is Dictionary:
-							var rel = mat_entry.get("relative_path", "")
-							if not rel.is_empty():
-								var p = NexusUtils.validate_index_path(rel)
-								if not p.is_empty() and FileAccess.file_exists(p):
-									material_paths.append(p)
-			file.close()
+	var discovered := NexusSceneUtils.discover_unindexed_composition_gltfs(asset_index)
+	for path in discovered:
+		if path not in gltf_paths:
+			gltf_paths.append(path)
+	if not discovered.is_empty():
+		print_rich(
+			"[color=yellow]Nexus Reimport:[/color] Found %d composition/level glTF(s) on disk missing from asset_index.json."
+			% discovered.size()
+		)
+
+	var mat_index = NexusUtils.load_index_json(
+		NexusPaths.material_index_path(),
+		"material_index.json",
+		false,
+	)
+	for mat_id in mat_index.keys():
+		var mat_entry = mat_index[mat_id]
+		var rel = mat_entry.get("relative_path", "")
+		if rel.is_empty():
+			continue
+		var p = NexusUtils.validate_index_path(rel)
+		if not p.is_empty() and FileAccess.file_exists(p):
+			material_paths.append(p)
 
 	var dirs_to_scan: Dictionary = {}
 	for p in gltf_paths:
@@ -91,52 +81,78 @@ func reimport_from_index() -> void:
 			NexusSceneUtils.collect_files_with_extensions(dir_path, ["png", "jpg", "jpeg", "webp"])
 		)
 
-	_reimport_manager.queue_phased_paths(texture_paths, gltf_paths)
+	var split := NexusSceneUtils.split_gltf_paths_for_phased_reimport(gltf_paths)
+	var wave1_paths: Array = split.get("wave1", [])
+	var deferred_paths: Array = split.get("deferred", [])
+	_reimport_manager.queue_phased_reimport_from_gltf_paths(texture_paths, gltf_paths)
 
 	var total = texture_paths.size() + material_paths.size() + gltf_paths.size() + skipped
 	print_rich(
-		"[color=cyan]Nexus Reimport:[/color] Queued %d texture(s), %d glTF/GLB. "
-		% [texture_paths.size(), gltf_paths.size()]
-		+ "%d material(s) (no reimport). Skipped %d." % [material_paths.size(), skipped]
+		"[color=cyan]Nexus Reimport:[/color] Queued %d texture(s), %d glTF/GLB (wave 1). "
+		% [texture_paths.size(), wave1_paths.size()]
+		+ "Deferred %d composition/level glTF(s) for wave 2. "
+		% deferred_paths.size()
+		+ "%d material(s) (no reimport; re-export from Blender to refresh .tres). Skipped %d."
+		% [material_paths.size(), skipped]
 	)
 	if total == 0:
 		print_rich("[color=yellow]Nexus Reimport:[/color] No assets in index.")
 
 
-func sanitize_orphaned_assets() -> void:
-	var asset_index = load_asset_index()
-	if asset_index.is_empty():
+func _sanitize_index_entries(
+	index_path: String,
+	label: String,
+	file_exists_check: Callable,
+) -> void:
+	var load_result := NexusUtils.try_load_index_json(index_path, label)
+	if not load_result.ok:
+		push_error("Nexus: Refusing to sanitize %s: %s" % [label, load_result.error])
 		return
+
+	var source_index: Dictionary = load_result.entries
+	if source_index.is_empty():
+		return
+
 	var sanitized: Dictionary = {}
 	var removed := 0
-	for asset_id in asset_index.keys():
-		var entry = asset_index[asset_id]
-		if not entry is Dictionary:
-			removed += 1
-			continue
+	for entry_id in source_index.keys():
+		var entry = source_index[entry_id]
 		var rel_path = entry.get("relative_path", "")
 		if rel_path.is_empty():
 			removed += 1
 			continue
-		var gltf_path = NexusUtils.validate_index_path(rel_path)
-		if gltf_path.is_empty():
+		var resource_path = NexusUtils.validate_index_path(rel_path)
+		if resource_path.is_empty():
 			removed += 1
 			continue
-		if FileAccess.file_exists(gltf_path):
-			sanitized[asset_id] = entry
+		if file_exists_check.call(resource_path):
+			sanitized[entry_id] = entry
 		else:
 			removed += 1
-	var asset_index_path = NexusPaths.asset_index_path()
-	var file = FileAccess.open(asset_index_path, FileAccess.WRITE)
-	if not file:
-		push_error("Nexus: Could not write asset index.")
+
+	if not NexusUtils.atomic_write_index_json(index_path, sanitized, label):
 		return
-	file.store_string(JSON.stringify(sanitized))
-	file.close()
+
 	if removed > 0:
 		print_rich(
-			"[color=cyan]Nexus Sanitization:[/color] Removed %d orphaned entries from asset_index."
-			% removed
+			"[color=cyan]Nexus Sanitization:[/color] Removed %d orphaned entries from %s."
+			% [removed, label]
 		)
 	else:
-		print_rich("[color=green]Nexus Sanitization:[/color] No orphaned entries found.")
+		print_rich("[color=green]Nexus Sanitization:[/color] No orphaned entries found in %s." % label)
+
+
+func sanitize_orphaned_assets() -> void:
+	_sanitize_index_entries(
+		NexusPaths.asset_index_path(),
+		"asset_index.json",
+		func(resource_path: String) -> bool: return FileAccess.file_exists(resource_path),
+	)
+
+
+func sanitize_orphaned_materials() -> void:
+	_sanitize_index_entries(
+		NexusPaths.material_index_path(),
+		"material_index.json",
+		func(resource_path: String) -> bool: return FileAccess.file_exists(resource_path),
+	)

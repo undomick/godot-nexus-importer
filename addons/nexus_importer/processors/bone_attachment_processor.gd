@@ -44,12 +44,6 @@ func process(node: Node3D, meta: Dictionary, root: Node) -> bool:
 	node.owner = root
 	node.transform = offset
 
-	var attachment_data = meta["nexus_bone_attachment"]
-	var skel_scale = _get_armature_scale(root, skeleton)
-	var use_blender_scale = attachment_data.has("offset_scale") and attachment_data["offset_scale"].size() >= 3
-	if skel_scale.x > 0.0001 and skel_scale.y > 0.0001 and skel_scale.z > 0.0001 and not use_blender_scale:
-		node.scale = Vector3(1.0 / skel_scale.x, 1.0 / skel_scale.y, 1.0 / skel_scale.z)
-
 	if OS.is_debug_build():
 		print(
 			"Nexus Processor: ModifierBoneTarget '%s' -> bone '%s' | pos=%s scale=%s"
@@ -82,57 +76,29 @@ func _resolve_bone_offset(
 	bone_idx: int,
 	meta: Dictionary
 ) -> Transform3D:
-	var attachment_data = meta["nexus_bone_attachment"]
-	var offset = Transform3D.IDENTITY
-	var skel_scale = _get_armature_scale(root, skeleton)
-
-	var use_blender_offset = attachment_data.has("offset_translation")
-	var ot = attachment_data.get("offset_translation", [])
-	var offset_is_zero = (
-		use_blender_offset
-		and ot.size() >= 3
-		and abs(ot[0]) < 0.0001
-		and abs(ot[1]) < 0.0001
-		and abs(ot[2]) < 0.0001
-	)
-
-	var use_blender_scale = attachment_data.has("offset_scale") and attachment_data["offset_scale"].size() >= 3
-	var scale_for_basis := Vector3.ONE
-	if use_blender_scale:
-		var os = attachment_data["offset_scale"]
-		scale_for_basis = Vector3(os[0], os[1], os[2])
-	elif skel_scale.x > 0.0001 and skel_scale.y > 0.0001 and skel_scale.z > 0.0001:
-		scale_for_basis = Vector3(1.0 / skel_scale.x, 1.0 / skel_scale.y, 1.0 / skel_scale.z)
-
-	if use_blender_offset and not offset_is_zero:
-		offset.origin = Vector3(ot[0], ot[1], ot[2])
-		var basis_rot = Basis.IDENTITY
-		if attachment_data.has("offset_rotation"):
-			var r = attachment_data["offset_rotation"]
-			basis_rot = Basis(Quaternion(r[0], r[1], r[2], r[3]))
-		offset.basis = basis_rot * Basis.from_scale(scale_for_basis)
-		if skel_scale.x > 0.0001 and skel_scale.y > 0.0001 and skel_scale.z > 0.0001:
-			offset.origin *= Vector3(1.0 / skel_scale.x, 1.0 / skel_scale.y, 1.0 / skel_scale.z)
-		return offset
-
-	var empty_world: Transform3D
-	var gltf_path = root.get_meta("_nexus_gltf_path", "")
-	var world_xform = _get_node_world_transform_from_gltf(gltf_path, node.name, meta, true)
-	if world_xform != null:
-		empty_world = world_xform
-	elif node.is_inside_tree():
-		skeleton.force_update_bone_child_transform(bone_idx)
-		empty_world = node.global_transform
-	else:
-		empty_world = _get_accumulated_transform(node, root)
-
-	var skel_world = (
+	# Reconstruct the bone-relative offset in skeleton-local space from the node's
+	# actual world transform and the bone rest. This is frame-agnostic: the exporter
+	# only provides the node's world TRS (via the glTF node) and the bone name, so no
+	# B2G/conversion assumptions are baked in. node.world = skel_world @ bone_rest @ offset.
+	var node_world := _get_node_world_transform(node, root, meta)
+	var skel_world := (
 		skeleton.global_transform
 		if skeleton.is_inside_tree()
 		else _get_accumulated_transform(skeleton, root)
 	)
-	var bone_world = skel_world * skeleton.get_bone_global_rest(bone_idx)
-	return _compute_bone_relative_offset(bone_world, empty_world, skel_scale)
+	var empty_skel := skel_world.affine_inverse() * node_world
+	var bone_rest := skeleton.get_bone_global_rest(bone_idx)
+	return bone_rest.affine_inverse() * empty_skel
+
+
+func _get_node_world_transform(node: Node3D, root: Node, meta: Dictionary) -> Transform3D:
+	if node.is_inside_tree():
+		return node.global_transform
+	var gltf_path = root.get_meta("_nexus_gltf_path", "")
+	var world_xform = _get_node_world_transform_from_gltf(gltf_path, node.name, meta, false)
+	if world_xform != null:
+		return world_xform
+	return _get_accumulated_transform(node, root)
 
 
 func _ensure_bone_target(
@@ -232,15 +198,6 @@ func _parse_gltf_node_transform(n: Dictionary, use_scale_one: bool = false) -> T
 	return Transform3D(Basis(q) * Basis.from_scale(scale), origin)
 
 
-func _compute_bone_relative_offset(bone_world: Transform3D, empty_world: Transform3D, skel_scale: Vector3) -> Transform3D:
-	var offset = bone_world.affine_inverse() * empty_world
-	if skel_scale.x > 0.0001 and skel_scale.y > 0.0001 and skel_scale.z > 0.0001:
-		offset.basis = offset.basis * Basis.from_scale(
-			Vector3(1.0 / skel_scale.x, 1.0 / skel_scale.y, 1.0 / skel_scale.z)
-		)
-	return offset
-
-
 func _get_float(arr: Array, i: int) -> float:
 	if i >= arr.size():
 		return 0.0 if i < 3 else 1.0
@@ -250,18 +207,6 @@ func _get_float(arr: Array, i: int) -> float:
 	if v is int:
 		return float(v)
 	return 0.0
-
-
-func _get_armature_scale(root: Node, skeleton: Skeleton3D) -> Vector3:
-	var armature = _find_node_by_name(root, "Armature")
-	if armature:
-		var scale_acc = _get_accumulated_scale(armature, root)
-		if scale_acc.x < 0.9 or scale_acc.y < 0.9 or scale_acc.z < 0.9:
-			return scale_acc
-	var scale_acc = _get_accumulated_scale(skeleton, root)
-	if scale_acc.x < 0.9 or scale_acc.y < 0.9 or scale_acc.z < 0.9:
-		return scale_acc
-	return Vector3(1.0, 1.0, 1.0)
 
 
 func _get_accumulated_transform(node: Node, root: Node) -> Transform3D:
@@ -280,34 +225,6 @@ func _get_accumulated_transform(node: Node, root: Node) -> Transform3D:
 		if nd is Node3D:
 			t = t * nd.transform
 	return t
-
-
-func _get_accumulated_scale(node: Node, root: Node) -> Vector3:
-	var path: Array[Node] = []
-	var n: Node = node
-	while is_instance_valid(n):
-		path.append(n)
-		if n == root:
-			break
-		n = n.get_parent()
-	if path.is_empty():
-		return Vector3(1.0, 1.0, 1.0)
-	path.reverse()
-	var s = Vector3(1.0, 1.0, 1.0)
-	for nd in path:
-		if nd is Node3D:
-			s = s * nd.transform.basis.get_scale()
-	return s
-
-
-func _find_node_by_name(n: Node, name: String) -> Node:
-	if n.name == name:
-		return n
-	for c in n.get_children():
-		var found = _find_node_by_name(c, name)
-		if found:
-			return found
-	return null
 
 
 func _is_skeleton_child(node: Node, skeleton: Skeleton3D) -> bool:

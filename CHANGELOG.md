@@ -2,6 +2,38 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
+## [2.0.0] - 2026-07-18
+
+### Blender Addon (nexus_b2g)
+
+- **New Collection Types:** Exclude, Folder, Combined Asset
+- **New Root Type:** VehicleBody3D
+- **New Collision Type:** SeparationRayShape3D (Use an empty to find this collision type)
+- **Breaking:** nested Levels blocked; use new **Combined Asset** type.
+- Nested Assets inline are now possible.
+- Anim-lib `.res` next to the anim-lib glTF; glTF carries `target_asset_path` for the skeleton.
+- Project path presets (1–8); separate Material / Texture Layout (default: Dedicated folder) replaces Resource Layout.
+- gltfpack **1.2** with **Clean** / **Compressed** modes, new optimizer options.
+- Sync Lights from Godot; extended light metadata/UI (Area, gobos, cull mask, …).
+- Shader export: Mix Shader, more nodes (Layer Weight, Sky, Sheen, …), group/displacement support; partial BSDFs warn instead of failing export.
+- Fixes: Smart Export skip/hash, curve multi-user bake, visibility, collection name sanitize, shared Level materials, Reference Existing re-export.
+- **Geometry Container GLB:** export a shareable `.glb` with materials and textures embedded. Previous binary mode is now **GLB Separate**.
+- **Parallel batch export** (opt-in): run several `.blend` files at once via Parallel Workers.
+- **Smart batch** skips unchanged files entirely (Force still re-exports everything).
+- **Set Defaults** in Project Paths: preferred Scene Style per root type, stored with the Source folder.
+- Cleaner batch log (less spam, clearer errors); empty/invalid collections warn or skip without leaving empty folders.
+
+### Godot Addon (nexus_importer)
+
+- Scene Style (generate Wrapper or Inherited) was moved to Blender (Collection Section)
+- Anim-lib `.res` from `animation_libs/`; skeleton via `target_asset_path` (legacy fallback kept).
+- Faster batch reimport; level/combined instancing waits until dependency scenes exist.
+- Nested Asset/Skeletal collections import with their own Godot root type.
+- Extended light import (AreaLight3D 4.7+, gobos, visibility/shadow, …).
+- Tools → Sanitize orphaned materials.
+- Import pipeline fixes (wrappers, Combined before Level, lights metadata).
+- Typical **GLB** imports write editable `.tres` materials next to the `.glb`; Nexus Separate still uses the material index.
+
 ## [1.5.1] - 2026-05-31
 
 ### Blender Addon (nexus_b2g)
@@ -51,7 +83,7 @@ All notable changes to the Nexus Pipeline (Blender → Godot) are documented her
 #### Blender Addon (nexus_b2g)
 
 - **Reference Existing (material)**: `material_index.json` entries were overwritten after export with the default generated `.tres` path, so Godot kept using the wrong resource. The post-pass now only merges `source_blend_file` (and name) and leaves `**relative_path` / `content_hash`** to the material exporter. The material file browser stores `**res://`** paths via the same conversion as typed paths.
-- **Material export skip logic**: When `content_hash` already matched the reference state but `**relative_path` in the index was still wrong** (legacy inconsistency), export skipped and never repaired the index. Skip now requires **hash match and path match** for Reference; for Generate, **hash + path + on-disk `.tres` content** matching a fresh generation (including `nexus_material_id`), so stale or incomplete hashes no longer suppress needed writes.
+- **Material export skip logic**: When `content_hash` already matched the reference state but `**relative_path` in the index was still wrong** (legacy inconsistency), export skipped and never repaired the index. Skip now requires **hash match and path match** for Reference; for Generate, **hash + path + on-disk** `.tres` **content** matching a fresh generation (including `nexus_material_id`), so stale or incomplete hashes no longer suppress needed writes.
 
 ## [1.3.1] - 2026-03-15
 

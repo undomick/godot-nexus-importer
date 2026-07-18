@@ -1,5 +1,7 @@
 extends Node
 
+const NexusVisibilityRange = preload("res://addons/nexus_importer/scripts/nexus_visibility_range.gd")
+
 ## Legacy fallback for glTF imports created before visibility ranges were baked at import time.
 ## New imports set GeometryInstance3D.visibility_range_* directly and do not add this node.
 
@@ -25,10 +27,11 @@ func _apply_recursive(node: Node) -> void:
 	if node is GeometryInstance3D and node.has_meta("nexus_visibility_range"):
 		var range_data = node.get_meta("nexus_visibility_range")
 		if range_data is Dictionary:
-			node.visibility_range_begin = range_data.get("begin", 0.0)
-			node.visibility_range_begin_margin = range_data.get("begin_margin", 0.0)
-			node.visibility_range_end = range_data.get("end", 0.0)
-			node.visibility_range_end_margin = range_data.get("end_margin", 0.0)
+			var values := NexusVisibilityRange.sanitize_dict(range_data)
+			node.visibility_range_begin = values["begin"]
+			node.visibility_range_begin_margin = values["begin_margin"]
+			node.visibility_range_end = values["end"]
+			node.visibility_range_end_margin = values["end_margin"]
 			node.visibility_range_fade_mode = FADE_MODE
 			node.remove_meta("nexus_visibility_range")
 	for child in node.get_children():

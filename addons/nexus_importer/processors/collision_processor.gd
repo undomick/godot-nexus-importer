@@ -3,6 +3,13 @@ extends Object
 
 ## Creates CollisionShape3D from nexus_collision_dims or nexus_mesh_collision_shape.
 
+const RootProcessor = preload("res://addons/nexus_importer/processors/root_processor.gd")
+const NexusTransformSanitize = preload("res://addons/nexus_importer/scripts/nexus_transform_sanitize.gd")
+
+const COLLISION_SHAPES_DIR := "collisionshapes"
+
+var _root_processor = RootProcessor.new()
+
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: Node, stats: Dictionary) -> bool:
 	var shape_type = node_meta.get("nexus_mesh_collision_shape", "")
 	if shape_type in ["RESONANCE_STATIC", "RESONANCE_DYNAMIC"]:
@@ -24,34 +31,101 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	if not shape_resource:
 		return false
 
-	var col_shape_node = _build_collision_shape_node(node, shape_resource, local_offset)
-	_apply_collision_meta(col_shape_node, scene_meta, node_meta)
+	if col_data.get("shape", "") == "SEPARATION_RAY":
+		shape_resource = _externalize_separation_ray_shape(shape_resource, root, node.name)
 
+	var collision_parent = _resolve_collision_parent(parent, node, scene_meta, root, stats)
+	var col_shape_node = _build_collision_shape_node(
+		node, shape_resource, local_offset, col_data, collision_parent
+	)
+	_apply_collision_meta(col_shape_node, scene_meta, node_meta)
 	var should_replace = _should_replace_source_node(node, node_meta, col_data)
-	stats.collisions += 1
+	stats["collisions"] = int(stats.get("collisions", 0)) + 1
 
 	if should_replace:
 		col_shape_node.name = node.name
 		parent.remove_child(node)
-		parent.add_child(col_shape_node)
+		collision_parent.add_child(col_shape_node)
 		col_shape_node.owner = root
 		node.free()
 		return true
 
 	col_shape_node.name = node.name + "_Col"
-	parent.add_child(col_shape_node)
+	collision_parent.add_child(col_shape_node)
 	col_shape_node.owner = root
 	return false
+
+
+func _resolve_collision_parent(
+	parent: Node,
+	node: Node,
+	scene_meta: Dictionary,
+	root: Node,
+	stats: Dictionary
+) -> Node:
+	if parent is CollisionObject3D:
+		return parent
+
+	# Bone-attached hitboxes live under ModifierBoneTarget3D, not a physics body.
+	if parent is ModifierBoneTarget3D:
+		return _wrap_collision_in_hitzone(parent, node, scene_meta, root, stats)
+
+	var ancestor := parent
+	while ancestor:
+		if ancestor is CollisionObject3D:
+			return ancestor
+		ancestor = ancestor.get_parent()
+
+	return parent
+
+
+func _wrap_collision_in_hitzone(
+	parent: Node,
+	node: Node,
+	scene_meta: Dictionary,
+	root: Node,
+	stats: Dictionary
+) -> Area3D:
+	var area := Area3D.new()
+	area.name = node.name + "_HitZone"
+	area.transform = Transform3D.IDENTITY
+	parent.add_child(area)
+	area.owner = root
+	_root_processor.set_collision_layers(area, scene_meta, stats)
+	return area
 
 
 func _build_collision_shape_node(
 	node: Node,
 	shape_resource: Shape3D,
-	local_offset: Vector3
+	local_offset: Vector3,
+	col_data: Dictionary,
+	collision_parent: Node
 ) -> CollisionShape3D:
 	var col_shape_node = CollisionShape3D.new()
 	col_shape_node.shape = shape_resource
-	col_shape_node.transform = node.transform * Transform3D(Basis(), local_offset)
+	var node3d := node as Node3D
+	if node3d == null:
+		push_warning("Nexus Collision: Expected Node3D for collision shape on '%s'." % node.name)
+		return col_shape_node
+
+	var local_basis = Basis.IDENTITY
+	if col_data.get("shape", "") == "SEPARATION_RAY":
+		local_basis = Basis.from_euler(Vector3(-PI / 2.0, 0.0, 0.0))
+	var offset_transform := Transform3D(local_basis, local_offset)
+	var safe_node_transform := NexusTransformSanitize.sanitize(node3d.transform, node3d.name)
+	var immediate_parent := node3d.get_parent()
+	if immediate_parent != null and collision_parent != immediate_parent:
+		var safe_global := NexusTransformSanitize.sanitize(_composed_global_transform(node3d), node3d.name)
+		var target_global: Transform3D = safe_global * offset_transform
+		if collision_parent is Node3D:
+			var parent_3d := collision_parent as Node3D
+			var safe_parent_global := NexusTransformSanitize.sanitize(_composed_global_transform(parent_3d), parent_3d.name)
+			col_shape_node.transform = safe_parent_global.affine_inverse() * target_global
+		else:
+			col_shape_node.transform = safe_node_transform * offset_transform
+	else:
+		col_shape_node.transform = safe_node_transform * offset_transform
 	return col_shape_node
 
 
@@ -114,7 +188,39 @@ func _create_primitive_shape(col_data: Dictionary) -> Shape3D:
 			return shape
 		"WORLDBOUNDARY":
 			return WorldBoundaryShape3D.new()
+		"SEPARATION_RAY":
+			var shape = SeparationRayShape3D.new()
+			shape.length = col_data.get("length", 1.0)
+			shape.slide_on_slope = col_data.get("slide_on_slope", false)
+			shape.custom_solver_bias = col_data.get("custom_solver_bias", 0.0)
+			shape.margin = col_data.get("shape_margin", 0.04)
+			return shape
 	return null
+
+
+func _externalize_separation_ray_shape(shape: Shape3D, root: Node, node_name: String) -> Shape3D:
+	if not shape is SeparationRayShape3D:
+		return shape
+
+	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
+	if gltf_path.is_empty():
+		return shape
+
+	var shapes_dir := gltf_path.get_base_dir().path_join(COLLISION_SHAPES_DIR)
+	var dir_err := DirAccess.make_dir_recursive_absolute(shapes_dir)
+	if dir_err != OK and dir_err != ERR_ALREADY_EXISTS:
+		push_warning("Nexus Collision: Could not create shape folder '%s'." % shapes_dir)
+		return shape
+
+	var safe_name := NexusUtils.sanitize_path_segment(node_name)
+	var shape_path := shapes_dir.path_join("%s.tres" % safe_name)
+	var save_err := ResourceSaver.save(shape, shape_path)
+	if save_err != OK:
+		push_warning("Nexus Collision: Could not save shape to '%s'." % shape_path)
+		return shape
+
+	var loaded := ResourceLoader.load(shape_path) as Shape3D
+	return loaded if loaded else shape
 
 
 func _create_mesh_shape(mesh: Mesh, shape_type: String, offset: Vector3) -> Shape3D:
@@ -137,3 +243,21 @@ func _create_mesh_shape(mesh: Mesh, shape_type: String, offset: Vector3) -> Shap
 			trimesh.set_faces(f)
 		return trimesh
 	return null
+
+
+# World transform from the local chain so it works on nodes that are not yet
+# added to the SceneTree (Godot 4.7 returns IDENTITY for off-tree global_transform).
+func _composed_global_transform(node_3d: Node3D) -> Transform3D:
+	if node_3d.is_inside_tree():
+		return node_3d.global_transform
+
+	var chain: Array[Node3D] = []
+	var current: Node = node_3d
+	while current is Node3D:
+		chain.push_front(current as Node3D)
+		current = current.get_parent()
+
+	var result := Transform3D.IDENTITY
+	for node in chain:
+		result = result * node.transform
+	return result

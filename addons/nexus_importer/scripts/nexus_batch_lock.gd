@@ -15,14 +15,21 @@ static func lock_file_path() -> String:
 
 
 static func is_active() -> bool:
+	var path := lock_file_path()
+	if not FileAccess.file_exists(path):
+		return false
 	var data := _read_lock()
 	if data.is_empty():
-		return false
+		# Blender refreshes via atomic replace; persistent unreadable files are crash artifacts.
+		var modified := FileAccess.get_modified_time(path)
+		if modified <= 0.0 or (Time.get_unix_time_from_system() - modified) > 2.0:
+			_remove_lock_file()
+			return false
+		return true
 	if _is_stale(data):
 		_remove_lock_file()
 		return false
 	return true
-
 
 static func defer_path(path: String) -> void:
 	if path.is_empty():
@@ -60,23 +67,46 @@ static func _read_lock() -> Dictionary:
 	var path := lock_file_path()
 	if not FileAccess.file_exists(path):
 		return {}
-	var file := FileAccess.open(path, FileAccess.READ)
-	if not file:
+	var text := NexusUtils.read_utf8_text(path)
+	if text.is_empty():
 		return {}
 	var parsed = JSON.new()
-	if parsed.parse(file.get_as_text()) != OK:
-		file.close()
+	if parsed.parse(text) != OK:
 		return {}
-	file.close()
 	var data = parsed.get_data()
 	return data if data is Dictionary else {}
 
 
 static func _is_stale(data: Dictionary) -> bool:
+	var pid := int(data.get("pid", 0))
+	if pid > 0 and _pid_alive(pid):
+		return false
+	var worker_pid := int(data.get("worker_pid", 0))
+	if worker_pid > 0 and _pid_alive(worker_pid):
+		return false
+	if pid > 0 or worker_pid > 0:
+		return true
 	var updated := float(data.get("updated_at_unix", 0.0))
 	if updated <= 0.0:
 		return true
 	return (Time.get_unix_time_from_system() - updated) > STALE_SECONDS
+
+
+static func _pid_alive(pid: int) -> bool:
+	if pid <= 0:
+		return false
+	match OS.get_name():
+		"Windows":
+			var output: Array = []
+			var args: PackedStringArray = PackedStringArray([
+				"/FI", "PID eq %d" % pid, "/NH", "/FO", "CSV",
+			])
+			var exit_code := OS.execute("tasklist", args, output, true)
+			if exit_code != 0:
+				return true
+			return output.size() > 0 and str(output[0]).find(str(pid)) >= 0
+		_:
+			return OS.execute("kill", ["-0", str(pid)]) == 0
 
 
 static func _remove_lock_file() -> void:
