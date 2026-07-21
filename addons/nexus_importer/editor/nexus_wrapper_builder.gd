@@ -3,12 +3,6 @@ extends RefCounted
 
 ## Wrapper and inherited scene creation from imported glTF assets.
 
-const NexusBatchLock = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
-const NexusEditorSceneGuard = preload(
-	"res://addons/nexus_importer/editor/nexus_editor_scene_guard.gd"
-)
-const NexusExportOrder = preload("res://addons/nexus_importer/scripts/nexus_export_order.gd")
-const NexusImportContext = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
 const InstancingProcessor = preload("res://addons/nexus_importer/processors/instancing_processor.gd")
 const MultiMeshProcessor = preload("res://addons/nexus_importer/processors/multimesh_processor.gd")
 
@@ -17,12 +11,9 @@ const NEXUS_NODE_META := "NEXUS_NODE_METADATA"
 const SCENE_LOAD_WAIT_FRAMES = 3
 const INHERITED_OPEN_ATTEMPTS = 5
 const INHERITED_OPEN_WAIT_FRAMES_PER_ATTEMPT = 60
-# Max forced non-deferred reimports when an inherited build opens a composition
-# glTF whose .import still holds unresolved instance placeholders.
+# Max forced non-deferred reimports for unresolved composition placeholders.
 const MAX_PLACEHOLDER_REIMPORT_RETRIES = 2
-# Max consecutive inherited-open timeouts before a glTF is marked aborted so the
-# re-queue loop stops instead of spinning forever (e.g. multimesh composite that
-# cannot be recognized as the expected edit root).
+# Abort after this many open timeouts so the re-queue loop cannot spin forever.
 const MAX_INHERITED_OPEN_TIMEOUTS = 2
 
 var _plugin: EditorPlugin
@@ -35,26 +26,20 @@ var _inherited_aborted: Dictionary = {}
 
 var scan_when_idle: bool = false
 
-
 func _init(plugin: EditorPlugin) -> void:
 	_plugin = plugin
-
 
 func is_busy() -> bool:
 	return _inherited_creation_in_progress or _wrapper_creation_in_progress
 
-
 func has_pending() -> bool:
 	return not _queue.is_empty()
-
 
 func is_scene_queued(gltf_path: String) -> bool:
 	return _queue.has(gltf_path)
 
-
 func _signal_wrapper_queue_idle() -> void:
 	scan_when_idle = true
-
 
 func queue_scene(gltf_path: String, scene_type: String = "") -> bool:
 	if gltf_path.is_empty():
@@ -90,10 +75,8 @@ func queue_scene(gltf_path: String, scene_type: String = "") -> bool:
 	_queue[gltf_path] = scene_type
 	return true
 
-
 func _multimesh_scene_queue_allowed(gltf_path: String) -> bool:
 	return NexusSceneUtils.multimesh_can_queue_inherited_scene(gltf_path)
-
 
 func queue_scenes_in_folder(folder_path: String, scene_type: String) -> int:
 	if folder_path.is_empty() or scene_type.is_empty():
@@ -117,7 +100,6 @@ func queue_scenes_in_folder(folder_path: String, scene_type: String) -> int:
 		)
 	return queued
 
-
 func tick_scene_creation(reimport_manager: NexusReimportManager) -> bool:
 	if _queue.is_empty():
 		return false
@@ -137,19 +119,26 @@ func tick_scene_creation(reimport_manager: NexusReimportManager) -> bool:
 		build_wrapper_scene_async(file_to_process)
 	return true
 
-
 func _highest_priority_queued_path() -> String:
 	if _queue.is_empty():
 		return ""
 	var best_path := ""
 	var best_priority := NexusExportOrder.PRIORITY_OTHER + 1
+	var best_defer := 2
 	for path in _queue.keys():
 		var priority := NexusExportOrder.export_type_priority_for_gltf(path)
-		if priority < best_priority or (priority == best_priority and (best_path.is_empty() or path < best_path)):
+		var defer_rank := 1 if NexusSceneUtils.gltf_should_defer_within_priority(path) else 0
+		if priority < best_priority:
 			best_priority = priority
+			best_defer = defer_rank
 			best_path = path
+		elif priority == best_priority:
+			if defer_rank < best_defer or (
+				defer_rank == best_defer and (best_path.is_empty() or path < best_path)
+			):
+				best_defer = defer_rank
+				best_path = path
 	return best_path
-
 
 func needs_scene_processing(gltf_path: String) -> bool:
 	if _inherited_aborted.has(gltf_path):
@@ -180,10 +169,7 @@ func needs_scene_processing(gltf_path: String) -> bool:
 		if export_type == "MULTIMESH_MANIFEST":
 			var import_ready := NexusSceneUtils.multimesh_import_ready(gltf_path)
 			return not import_ready.get("ok", false) or not FileAccess.file_exists(tscn_path)
-		# Re-exports (e.g. gltfpack Clean, which runs while the batch lock is held
-		# and therefore reimports via the deferred mass-import flush) must recreate
-		# the wrapper when the glTF is newer than the saved scene, not only when the
-		# scene file is missing.
+		# Recreate when glTF is newer than the saved scene (batch-lock re-exports).
 		if not FileAccess.file_exists(tscn_path):
 			return true
 		var gltf_mtime := FileAccess.get_modified_time(gltf_path)
@@ -206,18 +192,13 @@ func needs_scene_processing(gltf_path: String) -> bool:
 		if not FileAccess.file_exists(tscn_path):
 			return true
 
-	# A re-export rewrote the glTF on disk; recreate the wrapper when it is newer
-	# than the saved scene, even if the saved scene is structurally intact. The
-	# mass-import and composition branches already do this; regular assets on the
-	# normal (FS-triggered) reimport path need it too, otherwise re-exports only
-	# update the scene on a manual reimport.
+	# Recreate when glTF is newer than the saved scene (FS re-export path).
 	var reg_gltf_mtime := FileAccess.get_modified_time(gltf_path)
 	var reg_tscn_mtime := FileAccess.get_modified_time(tscn_path)
 	if reg_gltf_mtime > reg_tscn_mtime:
 		return true
 
 	return _saved_scene_needs_update(gltf_path, meta, tscn_path, scene_style)
-
 
 func _saved_scene_needs_update(
 	gltf_path: String, meta: Dictionary, tscn_path: String, scene_style: String
@@ -259,7 +240,6 @@ func _saved_scene_needs_update(
 	inst.free()
 	return false
 
-
 func _expected_resonance_count(gltf_path: String) -> int:
 	if gltf_path.is_empty():
 		return 0
@@ -283,7 +263,6 @@ func _expected_resonance_count(gltf_path: String) -> int:
 				count += 1
 	return count
 
-
 func _count_resonance_geometry_children(node: Node) -> int:
 	var count := 0
 	for child in node.get_children():
@@ -292,17 +271,12 @@ func _count_resonance_geometry_children(node: Node) -> int:
 			count += 1
 	return count
 
-
 func _notify_scene_file_written() -> void:
 	if _plugin and _plugin.has_method("notify_scene_file_written"):
 		_plugin.notify_scene_file_written()
 
-
 func build_wrapper_scene_async(gltf_path: String) -> void:
-	# Make sure the glTF has completed Nexus post-import (animation library saved,
-	# native AnimationPlayer removed for wrapper style) before we instance it;
-	# otherwise the wrapper would build against a half-processed subscene and miss
-	# nexus_anim_lib_path meta / .res, causing timing-dependent player duplication.
+	# Wait for post-import so the wrapper does not instance a half-processed glTF.
 	if _plugin and _plugin.has_method("ensure_nexus_gltf_imported_async"):
 		await _plugin.ensure_nexus_gltf_imported_async(gltf_path)
 	var fs_pre = _plugin.get_editor_interface().get_resource_filesystem()
@@ -366,12 +340,10 @@ func build_wrapper_scene_async(gltf_path: String) -> void:
 	root_node.free()
 	_finish_wrapper_creation()
 
-
 func _finish_wrapper_creation() -> void:
 	_wrapper_creation_in_progress = false
 	if _queue.is_empty():
 		_signal_wrapper_queue_idle()
-
 
 func build_inherited_scene_async(gltf_path: String) -> void:
 	if NexusSceneUtils.is_composition_gltf(gltf_path):
@@ -450,6 +422,7 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 		await _plugin.get_tree().process_frame
 
 	var root: Node = null
+	NexusEditorViewportGuard.push_pause(ei)
 	for _attempt in INHERITED_OPEN_ATTEMPTS:
 		ei.open_scene_from_path(gltf_path, true)
 		root = await _wait_for_inherited_edit_root(
@@ -458,6 +431,7 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 		if root != null:
 			break
 		await _plugin.get_tree().process_frame
+	NexusEditorViewportGuard.pop_pause(ei)
 
 	if root == null:
 		var timeouts: int = int(_inherited_open_timeout_counts.get(gltf_path, 0)) + 1
@@ -468,8 +442,7 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 			_inherited_open_timeout_counts.erase(gltf_path)
 			_inherited_aborted[gltf_path] = true
 			if export_type == "MULTIMESH_MANIFEST":
-				# Routes through handle_multimesh_inherited_failure which logs and
-				# calls _finish_inherited_creation; do not double-finish.
+				# handle_multimesh_inherited_failure already finishes; do not double-finish.
 				_handle_multimesh_inherited_failure(
 					gltf_path, "timed out opening glTF after %d attempt(s)" % timeouts
 				)
@@ -535,7 +508,6 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 
 	_finish_inherited_creation()
 
-
 func _handle_multimesh_inherited_failure(gltf_path: String, reason: String) -> void:
 	print_rich(
 		"[color=yellow]Nexus Inherited:[/color] MultiMesh '%s' deferred (%s)."
@@ -545,7 +517,6 @@ func _handle_multimesh_inherited_failure(gltf_path: String, reason: String) -> v
 		_plugin.handle_multimesh_inherited_failure(gltf_path, reason)
 	_finish_inherited_creation()
 
-
 func _finish_inherited_creation() -> void:
 	_inherited_creation_in_progress = false
 	_request_multimesh_inherited_scene_queue()
@@ -553,29 +524,30 @@ func _finish_inherited_creation() -> void:
 	if _queue.is_empty():
 		_signal_wrapper_queue_idle()
 
-
-# Clear the aborted/timeout state for a glTF so a fresh reimport/re-export can
-# retry the inherited build. Called by the reimport manager when a path is
-# reimported (manifest wave / composition reimport).
+# Clears abort so a fresh reimport/re-export can retry. Do not call from forced
+# composition-resolution reimports.
 func clear_inherited_abort(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
 	_inherited_aborted.erase(gltf_path)
 	_inherited_open_timeout_counts.erase(gltf_path)
+	_placeholder_retry_counts.erase(gltf_path)
 
-
-# Force-mark a glTF's inherited build as aborted (e.g. a stuck build detected by
-# the plugin, or test injection). Symmetric to clear_inherited_abort.
 func mark_inherited_aborted(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
 	_inherited_aborted[gltf_path] = true
 
+func is_inherited_aborted(gltf_path: String) -> bool:
+	return not gltf_path.is_empty() and _inherited_aborted.has(gltf_path)
 
 func _request_multimesh_inherited_scene_queue() -> void:
 	if _plugin and _plugin.has_method("request_multimesh_inherited_scene_queue"):
 		_plugin.request_multimesh_inherited_scene_queue()
 
+func _request_composition_inherited_scene_queue() -> void:
+	if _plugin and _plugin.has_method("request_composition_inherited_scene_queue"):
+		_plugin.request_composition_inherited_scene_queue()
 
 func _inject_multimesh_tree_into_open_scene(
 	root: Node, gltf_path: String, scene_meta: Dictionary
@@ -608,12 +580,6 @@ func _inject_multimesh_tree_into_open_scene(
 	composite.free()
 	return _find_multimesh_instance_recursive(root) != null
 
-
-func _request_composition_inherited_scene_queue() -> void:
-	if _plugin and _plugin.has_method("request_composition_inherited_scene_queue"):
-		_plugin.request_composition_inherited_scene_queue()
-
-
 func _find_multimesh_instance_recursive(node: Node) -> MultiMeshInstance3D:
 	if node is MultiMeshInstance3D:
 		return node
@@ -622,7 +588,6 @@ func _find_multimesh_instance_recursive(node: Node) -> MultiMeshInstance3D:
 		if found:
 			return found
 	return null
-
 
 func setup_animation_player(
 	root_node: Node,
@@ -637,10 +602,7 @@ func setup_animation_player(
 	if not needs_anim_player:
 		return
 	var anim_player: AnimationPlayer = _reuse_or_create_animation_player(root_node, gltf_instance)
-	# Track paths are authored relative to the glTF root. Resolving against the
-	# glTF instance (not the wrapper root) makes child-node tracks like "Cube"
-	# resolve in wrapper style; for inherited style gltf_instance == root_node,
-	# so this matches the existing parent-relative behavior.
+	# Tracks are authored relative to the glTF root, not the wrapper root.
 	anim_player.root_node = anim_player.get_path_to(gltf_instance)
 	var nexus_script = load("res://addons/nexus_importer/runtime/nexus_animation_player.gd")
 	if nexus_script:
@@ -664,24 +626,17 @@ func setup_animation_player(
 	if anim_list.size() > 0:
 		anim_player.set_meta("nexus_autoplay", anim_list[0])
 
-
 func _reuse_or_create_animation_player(root_node: Node, gltf_instance: Node) -> AnimationPlayer:
-	# Inherited style: root_node == gltf_instance, and the glTF retains an empty
-	# placeholder AnimationPlayer as a direct child. Reuse it so we don't add a
-	# second player that collides into @AnimationPlayer@<id>.
+	# Inherited: reuse the empty placeholder player to avoid @AnimationPlayer@ id clashes.
 	if root_node == gltf_instance:
 		var existing := _find_empty_animation_player_child(root_node)
 		if existing:
 			return existing
-	# Wrapper style (or inherited without a placeholder): strip stray empty
-	# players nested in the subscene (wrapper built from an inherited-style
-	# glTF) and create a fresh player owned by the scene root.
 	_strip_internal_animation_players(gltf_instance)
 	var player := AnimationPlayer.new()
 	player.name = "AnimationPlayer"
 	root_node.add_child(player)
 	return player
-
 
 func _find_empty_animation_player_child(node: Node) -> AnimationPlayer:
 	for child in node.get_children():
@@ -689,19 +644,13 @@ func _find_empty_animation_player_child(node: Node) -> AnimationPlayer:
 			return child
 	return null
 
-
 func _strip_internal_animation_players(subscene: Node) -> void:
-	# Remove empty placeholder AnimationPlayer nodes that non-wrapper scene
-	# styles retain inside the imported subscene, so the builder-owned player
-	# is the only one. Only direct empty players are stripped; nested players
-	# that carry their own library are left intact. For wrapper-style imports
-	# there is no placeholder, so this is a no-op.
+	# Strip empty direct-child players; leave nested library players alone.
 	for i in range(subscene.get_child_count() - 1, -1, -1):
 		var child = subscene.get_child(i)
 		if child is AnimationPlayer and not child.has_animation_library(""):
 			subscene.remove_child(child)
 			child.queue_free()
-
 
 func assign_wrapper_script(root_node: Node, target_script_path: String) -> void:
 	var safe_path := NexusUtils.validate_index_path(target_script_path)
@@ -715,7 +664,6 @@ func assign_wrapper_script(root_node: Node, target_script_path: String) -> void:
 	if script is Script:
 		root_node.set_script(script)
 
-
 func _make_inherited_collision_shapes_editable(root: Node) -> void:
 	var stack: Array[Node] = [root]
 	while not stack.is_empty():
@@ -728,7 +676,6 @@ func _make_inherited_collision_shapes_editable(root: Node) -> void:
 				col_shape.shape = col_shape.shape.duplicate(true)
 		for child in node.get_children():
 			stack.append(child)
-
 
 func attach_resonance_nodes(gltf_instance: Node, resonance_nodes: Array) -> void:
 	if resonance_nodes.is_empty():
@@ -745,7 +692,6 @@ func attach_resonance_nodes(gltf_instance: Node, resonance_nodes: Array) -> void
 		if resonance_node:
 			gltf_instance.add_child(resonance_node)
 			resonance_node.owner = gltf_instance.owner if gltf_instance.owner else gltf_instance
-
 
 func _instantiate_resonance_node(entry: Dictionary, gltf_instance: Node) -> Node3D:
 	var raw_material_path: String = entry.get("material_path", "")
@@ -781,7 +727,6 @@ func _instantiate_resonance_node(entry: Dictionary, gltf_instance: Node) -> Node
 		gltf_instance, path_from_root, shape_type, discard_mesh, base_name, material_path
 	)
 
-
 func _instantiate_resonance_from_sidecar(
 	entry: Dictionary,
 	mesh_path: String,
@@ -808,7 +753,6 @@ func _instantiate_resonance_from_sidecar(
 	resonance_node.name = base_name if discard_mesh else (base_name + "_Resonance")
 	return resonance_node
 
-
 func _instantiate_resonance_from_mesh_instance(
 	gltf_instance: Node,
 	path_from_root: String,
@@ -830,12 +774,10 @@ func _instantiate_resonance_from_mesh_instance(
 	resonance_node.name = base_name if discard_mesh else (base_name + "_Resonance")
 	return resonance_node
 
-
 func _create_resonance_geometry_node(shape_type: String) -> Node3D:
 	if shape_type == "RESONANCE_STATIC":
 		return ClassDB.instantiate("ResonanceStaticGeometry")
 	return ClassDB.instantiate("ResonanceDynamicGeometry")
-
 
 func _apply_resonance_material_and_mesh(
 	resonance_node: Node3D,
@@ -853,7 +795,6 @@ func _apply_resonance_material_and_mesh(
 	else:
 		resonance_node.set("geometry_override", mesh_ref)
 
-
 func _load_resonance_material(path: String) -> Resource:
 	if path.is_empty():
 		return _create_default_resonance_material()
@@ -867,12 +808,10 @@ func _load_resonance_material(path: String) -> Resource:
 			return res
 	return _create_default_resonance_material()
 
-
 func _create_default_resonance_material() -> Resource:
 	if not ClassDB.class_exists("ResonanceMaterial"):
 		return null
 	return ClassDB.instantiate("ResonanceMaterial")
-
 
 func _has_physics_body_recursive(node: Node) -> bool:
 	if node is PhysicsBody3D:
@@ -881,7 +820,6 @@ func _has_physics_body_recursive(node: Node) -> bool:
 		if _has_physics_body_recursive(child):
 			return true
 	return false
-
 
 func _has_resonance_nodes(gltf_path: String) -> bool:
 	if gltf_path.is_empty():
@@ -905,30 +843,88 @@ func _has_resonance_nodes(gltf_path: String) -> bool:
 				return true
 	return false
 
+func _abort_composition_inherited_for_placeholders(gltf_path: String, reason: String) -> void:
+	mark_inherited_aborted(gltf_path)
+	_placeholder_retry_counts.erase(gltf_path)
+	push_warning(
+		"Nexus Inherited: '%s' %s; aborting inherited build (retry after re-export or Reimport Assets)."
+		% [gltf_path.get_file(), reason]
+	)
+
+func _composition_placeholders_have_missing_targets(root: Node) -> bool:
+	## True when unresolved markers point at deleted/missing assets (reimport cannot help).
+	if root == null:
+		return false
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if not node.scene_file_path.is_empty():
+			for child in node.get_children():
+				stack.append(child)
+			continue
+		if node.has_meta("extras"):
+			var extras = node.get_meta("extras")
+			if extras is Dictionary and "NEXUS_NODE_METADATA" in extras:
+				var node_meta = extras["NEXUS_NODE_METADATA"]
+				if node_meta is Dictionary:
+					var asset_id := str(node_meta.get("nexus_asset_id", "")).strip_edges()
+					var placeholder_path := str(node_meta.get("nexus_placeholder_path", "")).strip_edges()
+					if asset_id.is_empty() and placeholder_path.is_empty():
+						pass
+					elif not asset_id.is_empty():
+						if _asset_id_instance_target_missing(asset_id):
+							return true
+					elif not placeholder_path.is_empty():
+						if NexusSceneUtils.resolve_packed_scene_path(placeholder_path).is_empty():
+							return true
+		for child in node.get_children():
+			stack.append(child)
+	return false
+
+func _asset_id_instance_target_missing(asset_id: String) -> bool:
+	var asset_index := NexusUtils.load_index_json(
+		NexusPaths.asset_index_path(),
+		"asset_index.json",
+		false,
+	)
+	if not asset_index.has(asset_id):
+		return true
+	var entry = asset_index[asset_id]
+	if not entry is Dictionary:
+		return true
+	var gltf_path := NexusUtils.validate_index_path(str(entry.get("relative_path", "")))
+	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
+		return true
+	# Prefer derived scenes, but glTF fallback still counts as resolvable.
+	return NexusSceneUtils.resolve_instanced_scene_path(gltf_path).is_empty()
 
 func _ensure_composition_instances_resolved(
 	ei: EditorInterface, root: Node, gltf_path: String
 ) -> Node:
-	# Compositions must save as a bare instance=ExtResource(gltf) that inherits
-	# the resolved instances baked into the glTF .import by _post_import. If the
-	# opened glTF still holds unresolved instance placeholders (deferred state
-	# leaked into the build), resolving them locally would persist a broken
-	# structure: the inherited placeholders reappear (yellow) alongside local
-	# _001-named instance overrides. Force a non-deferred reimport so _post_import
-	# resolves in the .import, then reopen.
+	# Unresolved placeholders must be fixed in .import via non-deferred reimport,
+	# not resolved locally (would bake yellow placeholders + _001 overrides).
 	if not NexusSceneUtils.is_composition_gltf(gltf_path):
 		return root
 	if not InstancingProcessor.has_unresolved_placeholders(root):
 		_placeholder_retry_counts.erase(gltf_path)
 		return root
 
+	# Missing targets cannot be fixed by reimport; abort to stop tab thrashing.
+	if _composition_placeholders_have_missing_targets(root):
+		_abort_composition_inherited_for_placeholders(
+			gltf_path,
+			"has unresolved instance placeholders with missing target scenes"
+		)
+		await _close_tab_by_path(ei, gltf_path)
+		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
+		return null
+
 	var retries: int = int(_placeholder_retry_counts.get(gltf_path, 0))
 	if retries >= MAX_PLACEHOLDER_REIMPORT_RETRIES:
-		push_warning(
-			"Nexus Inherited: '%s' still has unresolved instance placeholders after %d retries; aborting inherited build."
-			% [gltf_path.get_file(), retries]
+		_abort_composition_inherited_for_placeholders(
+			gltf_path,
+			"still has unresolved instance placeholders after %d retries" % retries
 		)
-		_placeholder_retry_counts.erase(gltf_path)
 		await _close_tab_by_path(ei, gltf_path)
 		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 		return null
@@ -945,6 +941,7 @@ func _ensure_composition_instances_resolved(
 		await _plugin.request_composition_instance_resolution_reimport(gltf_path)
 
 	var reopened: Node = null
+	NexusEditorViewportGuard.push_pause(ei)
 	for _attempt in INHERITED_OPEN_ATTEMPTS:
 		ei.open_scene_from_path(gltf_path, true)
 		reopened = await _wait_for_inherited_edit_root(
@@ -953,23 +950,27 @@ func _ensure_composition_instances_resolved(
 		if reopened != null:
 			break
 		await _plugin.get_tree().process_frame
+	NexusEditorViewportGuard.pop_pause(ei)
 
 	if reopened == null:
 		_log_inherited_open_timeout(ei, gltf_path)
+		_abort_composition_inherited_for_placeholders(
+			gltf_path,
+			"timed out reopening after placeholder resolution reimport"
+		)
 		await _close_tab_by_path(ei, gltf_path)
 		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 		return null
 	if InstancingProcessor.has_unresolved_placeholders(reopened):
-		push_warning(
-			"Nexus Inherited: '%s' still unresolved after non-deferred reimport; aborting build."
-			% gltf_path.get_file()
+		_abort_composition_inherited_for_placeholders(
+			gltf_path,
+			"still unresolved after non-deferred reimport"
 		)
 		await _close_tab_by_path(ei, gltf_path)
 		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 		return null
 	_placeholder_retry_counts.erase(gltf_path)
 	return reopened
-
 
 func _resolve_instances_before_inherited_save(root: Node, gltf_path: String) -> void:
 	if NexusImportContext.should_defer_external_scene_loads():
@@ -993,7 +994,6 @@ func _resolve_instances_before_inherited_save(root: Node, gltf_path: String) -> 
 	if composition_rebuild:
 		root.set_meta(InstancingProcessor.INSTANCES_RESOLVED_META, true)
 
-
 func _release_inherited_edit_tab(
 	editor_interface: EditorInterface,
 	saved_root: Node,
@@ -1005,9 +1005,6 @@ func _release_inherited_edit_tab(
 	if saved_root != null and is_instance_valid(saved_root):
 		editor_interface.set_object_edited(saved_root, false)
 
-	# The saved inherited scene is the active tab after save_scene_as. Close it
-	# explicitly so it does not linger as a background tab, then restore the
-	# scene the user had open before the build (if it survived the pre-close).
 	await _close_tab_by_path(editor_interface, saved_tscn_path)
 
 	if not previous_scene_path.is_empty() and previous_scene_path != saved_tscn_path:
@@ -1017,10 +1014,11 @@ func _release_inherited_edit_tab(
 			if current_root != null:
 				current_path = current_root.scene_file_path.replace("\\", "/")
 			if current_path != previous_scene_path:
+				NexusEditorViewportGuard.push_pause(editor_interface)
 				editor_interface.open_scene_from_path(previous_scene_path, false)
 				for _i in SCENE_LOAD_WAIT_FRAMES:
 					await _plugin.get_tree().process_frame
-
+				NexusEditorViewportGuard.pop_pause(editor_interface)
 
 func _is_scene_open(editor_interface: EditorInterface, scene_path: String) -> bool:
 	if editor_interface == null or scene_path.is_empty():
@@ -1031,13 +1029,13 @@ func _is_scene_open(editor_interface: EditorInterface, scene_path: String) -> bo
 			return true
 	return false
 
-
 func _close_tab_by_path(editor_interface: EditorInterface, scene_path: String) -> void:
 	if editor_interface == null or scene_path.is_empty():
 		return
 	var canonical := scene_path.replace("\\", "/")
+	NexusEditorViewportGuard.push_pause(editor_interface)
 
-	# Activate the target tab if it is not already active, so close_scene hits it.
+	# Activate the target tab so close_scene hits it.
 	var edited_root := editor_interface.get_edited_scene_root()
 	var edited_path := ""
 	if edited_root != null and not edited_root.scene_file_path.is_empty():
@@ -1047,19 +1045,18 @@ func _close_tab_by_path(editor_interface: EditorInterface, scene_path: String) -
 		for _i in SCENE_LOAD_WAIT_FRAMES:
 			await _plugin.get_tree().process_frame
 
-	# Clear edited flag and close the active tab. If the target was already
-	# gone (e.g. closed by a prior step), close_scene returns ERR_DOES_NOT_EXIST.
 	edited_root = editor_interface.get_edited_scene_root()
 	if edited_root != null and is_instance_valid(edited_root):
 		editor_interface.set_object_edited(edited_root, false)
 	if editor_interface.get_edited_scene_root() == null:
+		NexusEditorViewportGuard.pop_pause(editor_interface)
 		return
 	var close_err := editor_interface.close_scene()
 	if close_err != OK and close_err != ERR_DOES_NOT_EXIST:
 		push_warning("Nexus Inherited: close_scene returned %s" % error_string(close_err))
 	for _i in SCENE_LOAD_WAIT_FRAMES:
 		await _plugin.get_tree().process_frame
-
+	NexusEditorViewportGuard.pop_pause(editor_interface)
 
 func _canonical_gltf_path(gltf_path: String) -> String:
 	var expected := NexusUtils.to_res_gltf_path(gltf_path)
@@ -1067,16 +1064,11 @@ func _canonical_gltf_path(gltf_path: String) -> String:
 		expected = gltf_path.replace("\\", "/").strip_edges()
 	return expected
 
-
 func _is_neutral_keeper_root(root: Node) -> bool:
-	# Neutral empty state after closing the last tab: no valid edited root. This
-	# matches Godot 4.7's behavior where close_scene() on the final tab leaves
-	# get_edited_scene_root() == null (validated via headless editor spike). A
-	# freshly opened glTF root stays a valid node and is not mistaken for neutral.
+	# After closing the last tab, Godot leaves no valid edited root.
 	if root == null or not is_instance_valid(root):
 		return true
 	return false
-
 
 func _scene_paths_match_gltf(scene_path: String, expected_gltf: String) -> bool:
 	var edited_path := scene_path.replace("\\", "/")
@@ -1088,7 +1080,6 @@ func _scene_paths_match_gltf(scene_path: String, expected_gltf: String) -> bool:
 		edited_path.get_base_dir() == expected_gltf.get_base_dir()
 		and edited_path.get_basename() == expected_gltf.get_basename()
 	)
-
 
 func _is_expected_inherited_edit_root(root: Node, gltf_path: String) -> bool:
 	if root == null or not is_instance_valid(root):
@@ -1112,7 +1103,6 @@ func _is_expected_inherited_edit_root(root: Node, gltf_path: String) -> bool:
 
 	return false
 
-
 func _wait_for_inherited_edit_root(
 	editor_interface: EditorInterface,
 	gltf_path: String,
@@ -1128,7 +1118,6 @@ func _wait_for_inherited_edit_root(
 		await _plugin.get_tree().process_frame
 		open_wait += 1
 	return null
-
 
 func _log_inherited_open_timeout(
 	editor_interface: EditorInterface, gltf_path: String, attempt: int = 0, max_attempts: int = 0
@@ -1158,7 +1147,6 @@ func _log_inherited_open_timeout(
 			_canonical_gltf_path(gltf_path),
 		]
 	)
-
 
 func _resolve_asset_id_nodes_recursively(
 	node: Node, root: Node, processor: InstancingProcessor

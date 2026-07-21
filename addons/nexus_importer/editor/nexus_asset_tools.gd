@@ -3,22 +3,16 @@ extends RefCounted
 
 ## Asset index loading, bulk reimport, and index sanitization.
 
-const NexusSceneUtils = preload("res://addons/nexus_importer/scripts/nexus_scene_utils.gd")
-
 var _reimport_manager: NexusReimportManager
-
 
 func _init(reimport_manager: NexusReimportManager) -> void:
 	_reimport_manager = reimport_manager
 
-
 func load_asset_index() -> Dictionary:
 	return NexusUtils.load_index_json(NexusPaths.asset_index_path(), "asset_index.json")
 
-
 func load_material_index() -> Dictionary:
 	return NexusUtils.load_index_json(NexusPaths.material_index_path(), "material_index.json")
-
 
 func reimport_from_index() -> void:
 	var asset_index = load_asset_index()
@@ -98,7 +92,6 @@ func reimport_from_index() -> void:
 	if total == 0:
 		print_rich("[color=yellow]Nexus Reimport:[/color] No assets in index.")
 
-
 func _sanitize_index_entries(
 	index_path: String,
 	label: String,
@@ -141,14 +134,12 @@ func _sanitize_index_entries(
 	else:
 		print_rich("[color=green]Nexus Sanitization:[/color] No orphaned entries found in %s." % label)
 
-
 func sanitize_orphaned_assets() -> void:
 	_sanitize_index_entries(
 		NexusPaths.asset_index_path(),
 		"asset_index.json",
 		func(resource_path: String) -> bool: return FileAccess.file_exists(resource_path),
 	)
-
 
 func sanitize_orphaned_materials() -> void:
 	_sanitize_index_entries(

@@ -3,13 +3,10 @@ extends Object
 
 ## Converts nexus_light metadata to OmniLight3D, SpotLight3D, DirectionalLight3D or AreaLight3D.
 
-const NexusLightSanitize = preload("res://addons/nexus_importer/scripts/nexus_light_sanitize.gd")
-
 const BLENDER_WATTS_TO_GODOT := 0.01
 const DIRECTIONAL_ENERGY_CAP := 5.0
 const DEFAULT_SHADOW_BIAS := 0.03
 const AREA_LIGHT_CLASS := "AreaLight3D"
-
 
 func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	if not meta.has("nexus_light"):
@@ -63,7 +60,6 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	node.free()
 	return true
 
-
 func _apply_common_props(light: Light3D, data: Dictionary) -> void:
 	var c_arr = data.get("color", [1.0, 1.0, 1.0])
 	if c_arr is Array and c_arr.size() >= 3:
@@ -107,13 +103,11 @@ func _apply_common_props(light: Light3D, data: Dictionary) -> void:
 	if data.has("light_negative"):
 		light.light_negative = bool(data["light_negative"])
 
-
 func _apply_node_visibility_props(light: Light3D, meta: Dictionary) -> void:
 	if meta.has("visible"):
 		light.visible = bool(meta["visible"])
 	if meta.has("cast_shadow") and str(meta["cast_shadow"]) == "OFF":
 		light.shadow_enabled = false
-
 
 func _apply_omni_props(light: OmniLight3D, data: Dictionary) -> void:
 	light.omni_range = NexusLightSanitize.clamp_omni_range(float(data.get("range", 5.0)))
@@ -126,7 +120,6 @@ func _apply_omni_props(light: OmniLight3D, data: Dictionary) -> void:
 	else:
 		light.omni_shadow_mode = OmniLight3D.SHADOW_CUBE
 
-
 func _apply_spot_props(light: SpotLight3D, data: Dictionary) -> void:
 	light.spot_range = NexusLightSanitize.clamp_spot_range(float(data.get("range", 5.0)))
 	light.spot_angle = NexusLightSanitize.clamp_spot_angle(float(data.get("spot_angle_deg", 45.0)))
@@ -135,7 +128,6 @@ func _apply_spot_props(light: SpotLight3D, data: Dictionary) -> void:
 		light.light_size = maxf(float(data["light_size"]), 0.0)
 	if data.has("spot_attenuation"):
 		light.spot_attenuation = float(data["spot_attenuation"])
-
 
 func _apply_directional_props(light: DirectionalLight3D, data: Dictionary) -> void:
 	if data.has("light_angular_distance"):
@@ -147,7 +139,6 @@ func _apply_directional_props(light: DirectionalLight3D, data: Dictionary) -> vo
 			data.get("directional_shadow_max_distance", NexusLightSanitize.DEFAULT_DIR_SHADOW_DISTANCE)
 		)
 		light.directional_shadow_max_distance = maxf(shadow_distance, NexusLightSanitize.MIN_RANGE)
-
 
 func _apply_area_props(light: Light3D, data: Dictionary) -> void:
 	var area_size = data.get("area_size", [1.0, 1.0])
@@ -173,7 +164,6 @@ func _apply_area_props(light: Light3D, data: Dictionary) -> void:
 	if data.has("light_size"):
 		var pcss_size = float(data["light_size"])
 		light.light_size = pcss_size if pcss_size > 0.0 else 0.5
-
 
 func _apply_gobo(light: Light3D, data: Dictionary) -> void:
 	if not data.has("gobo"):
@@ -217,7 +207,6 @@ func _apply_gobo(light: Light3D, data: Dictionary) -> void:
 		light.light_projector = texture
 		if emission_strength > 0.0 and abs(emission_strength - 1.0) > 0.0001:
 			light.light_energy *= emission_strength
-
 
 func _is_area_light(light: Light3D) -> bool:
 	return light != null and light.get_class() == AREA_LIGHT_CLASS

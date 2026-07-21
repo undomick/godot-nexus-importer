@@ -1,16 +1,12 @@
 extends Node
 
-const NexusVisibilityRange = preload("res://addons/nexus_importer/scripts/nexus_visibility_range.gd")
-
 ## Legacy fallback for glTF imports created before visibility ranges were baked at import time.
 ## New imports set GeometryInstance3D.visibility_range_* directly and do not add this node.
 
 const FADE_MODE = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 
-
 func _ready() -> void:
 	call_deferred("_apply_and_remove")
-
 
 func _apply_and_remove() -> void:
 	var root = get_parent()
@@ -19,7 +15,6 @@ func _apply_and_remove() -> void:
 		return
 	_apply_recursive(root)
 	queue_free()
-
 
 func _apply_recursive(node: Node) -> void:
 	if node == self:

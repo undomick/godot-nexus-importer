@@ -1,19 +1,14 @@
 class_name NexusReimportManager
 extends RefCounted
 
-const NexusBatchLock = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
-const NexusEditorSceneGuard = preload(
-	"res://addons/nexus_importer/editor/nexus_editor_scene_guard.gd"
-)
-const NexusImportContext = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
-const NexusExportOrder = preload("res://addons/nexus_importer/scripts/nexus_export_order.gd")
-const NexusSceneUtils = preload("res://addons/nexus_importer/scripts/nexus_scene_utils.gd")
-
 ## Phased reimport queues, import-config fixups, and signal-based flush logic.
 
-const REIMPORT_DELAY = 2
+## Settle frames before reimport_files: 0 when FS idle, else 1.
+const REIMPORT_DELAY_BUSY = 1
 const FLUSH_FALLBACK_TIMEOUT = 2.5
-const SAFETY_FRAMES = 8
+## Post-batch idle cooldown: assets settle faster than composition/multimesh.
+const SAFETY_FRAMES_ASSET = 3
+const SAFETY_FRAMES_HEAVY = 6
 const RECENTLY_REIMPORTED_GRACE_MS := 5000
 
 const PHASE_IDLE = 0
@@ -47,20 +42,16 @@ var _config_stabilized_paths: Dictionary = {}
 var _config_pending_reimport_paths: Dictionary = {}
 var _recently_reimported_ms: Dictionary = {}
 
-
 func _init(plugin: EditorPlugin) -> void:
 	_plugin = plugin
 
-
 func is_reimport_active() -> bool:
 	return _reimport_pending or _reimport_in_progress or _batch_reimport_active
-
 
 func was_recently_reimported(gltf_path: String) -> bool:
 	if gltf_path.is_empty() or not _recently_reimported_ms.has(gltf_path):
 		return false
 	return Time.get_ticks_msec() - int(_recently_reimported_ms[gltf_path]) < RECENTLY_REIMPORTED_GRACE_MS
-
 
 func note_resources_reimported(resources: PackedStringArray) -> void:
 	var now := Time.get_ticks_msec()
@@ -86,95 +77,83 @@ func note_resources_reimported(resources: PackedStringArray) -> void:
 		var index_hash := str(index_entry.get("content_hash", "")).strip_edges()
 		NexusImportState.mark_imported(canonical, index_hash)
 
-
 func is_config_fix_needed(gltf_path: String) -> bool:
 	return _should_defer_config_fix(gltf_path)
-
 
 func _should_defer_config_fix(gltf_path: String) -> bool:
 	if _config_stabilized_paths.has(gltf_path):
 		if NexusSceneUtils.nexus_import_config_needs_fix(gltf_path):
-			# Stabilization assumed the sidecar still holds the Nexus import
-			# params. Drift here means Godot regenerated the sidecar with defaults
-			# (e.g. the source was deleted and re-exported under the same path).
-			# Invalidate and re-fix instead of silently skipping, otherwise a
-			# re-export while the editor is open never gets post-processed.
+			# Stabilized sidecar drifted back to defaults; invalidate and re-fix.
 			_config_stabilized_paths.erase(gltf_path)
 			return true
 		return false
 	return NexusSceneUtils.nexus_import_config_needs_fix(gltf_path)
 
-
 func _mark_config_pending_reimport(gltf_path: String) -> void:
 	_config_pending_reimport_paths[gltf_path] = true
 
-
 func is_config_wave_pending() -> bool:
-	return _config_wave_pending()
-
+	return not _config_deferred_queue.is_empty() or not _pending_reimport_after_signal.is_empty()
 
 func is_blocking_scene_creation() -> bool:
-	if is_reimport_active() or _config_wave_pending() or _batch_reimport_active:
+	if is_reimport_active() or is_config_wave_pending() or _batch_reimport_active:
 		return true
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
 	if fs.is_scanning():
 		return true
 	return false
 
-
 func prepare_editor_scenes_for_reimport(gltf_paths: Array) -> void:
-	_prepare_editor_scenes_for_reimport(gltf_paths)
-
-
-func _prepare_editor_scenes_for_reimport(gltf_paths: Array) -> void:
 	if gltf_paths.is_empty():
 		return
 	var ei = _plugin.get_editor_interface()
 	if ei == null:
 		return
+	# Sync tab close during active reimport/inherited build crashes Godot (esp. Multimesh).
+	if is_reimport_active():
+		return
+	if _plugin.has_method("is_wrapper_builder_busy") and _plugin.is_wrapper_builder_busy():
+		return
 	NexusEditorSceneGuard.close_open_scenes_for_reimport(ei, gltf_paths)
-
-
-func _config_wave_pending() -> bool:
-	return not _config_deferred_queue.is_empty() or not _pending_reimport_after_signal.is_empty()
-
 
 func has_pending_paths() -> bool:
 	return not _texture_paths.is_empty() or not _non_texture_paths.is_empty()
 
-
 func has_pending_reimport_work() -> bool:
 	return has_pending_paths() or has_deferred_composition_paths() or has_deferred_multimesh_paths()
-
 
 func has_deferred_composition_paths() -> bool:
 	return not _deferred_composition_gltf_paths.is_empty()
 
-
 func has_deferred_multimesh_paths() -> bool:
 	return not _deferred_multimesh_paths.is_empty()
-
 
 func is_composition_wave_active() -> bool:
 	return _composition_wave_active
 
-
 func is_multimesh_wave_active() -> bool:
 	return _multimesh_wave_active
-
 
 func try_queue_composition_wave() -> bool:
 	if _deferred_composition_gltf_paths.is_empty():
 		return false
 
+	var hold_levels := not _deferred_multimesh_paths.is_empty()
 	var ready_paths: Array[String] = []
+	var non_level_waiting := false
 	for path in _deferred_composition_gltf_paths:
 		var canonical := NexusUtils.to_res_gltf_path(path)
 		if canonical.is_empty():
 			canonical = path
+		if hold_levels and NexusSceneUtils.is_level_gltf(canonical):
+			continue
+		non_level_waiting = true
 		if NexusSceneUtils.composition_dependencies_ready(canonical):
 			ready_paths.append(canonical)
 	if ready_paths.is_empty():
+		# Only LEVEL entries remain while MultiMesh is still deferred - let MM run.
+		if hold_levels and not non_level_waiting:
+			return false
 		if _queue_blocking_composition_dependencies():
 			return false
 		_log_deferred_composition_wave_blocked()
@@ -196,10 +175,16 @@ func try_queue_composition_wave() -> bool:
 	)
 	return true
 
-
 func try_queue_multimesh_wave() -> bool:
 	if _deferred_multimesh_paths.is_empty():
 		return false
+	# Combined/Anim must finish before MultiMesh (LEVEL may still be held).
+	for path in _deferred_composition_gltf_paths:
+		var canonical := NexusUtils.to_res_gltf_path(path)
+		if canonical.is_empty():
+			canonical = path
+		if not NexusSceneUtils.is_level_gltf(canonical):
+			return false
 
 	var ready_paths: Array[String] = []
 	for path in _deferred_multimesh_paths:
@@ -230,7 +215,6 @@ func try_queue_multimesh_wave() -> bool:
 	)
 	return true
 
-
 func _log_deferred_multimesh_wave_blocked() -> void:
 	if _composition_wave_wait_log_frames > 0:
 		_composition_wave_wait_log_frames -= 1
@@ -249,7 +233,6 @@ func _log_deferred_multimesh_wave_blocked() -> void:
 		% ", ".join(waiting)
 	)
 
-
 func _erase_deferred_multimesh_path(canonical: String) -> void:
 	for i in range(_deferred_multimesh_paths.size() - 1, -1, -1):
 		var existing := NexusUtils.to_res_gltf_path(_deferred_multimesh_paths[i])
@@ -257,7 +240,6 @@ func _erase_deferred_multimesh_path(canonical: String) -> void:
 			existing = _deferred_multimesh_paths[i]
 		if existing == canonical:
 			_deferred_multimesh_paths.remove_at(i)
-
 
 func _is_deferred_composition_path(gltf_path: String) -> bool:
 	var canonical := NexusUtils.to_res_gltf_path(gltf_path)
@@ -270,7 +252,6 @@ func _is_deferred_composition_path(gltf_path: String) -> bool:
 		if existing == canonical:
 			return true
 	return false
-
 
 func _collect_unready_composition_dependencies() -> Array[String]:
 	var blocking: Array[String] = []
@@ -300,8 +281,7 @@ func _collect_unready_composition_dependencies() -> Array[String]:
 				continue
 			seen[dep_canonical] = true
 			blocking.append(dep_canonical)
-	return NexusExportOrder.sort_gltf_paths(blocking)
-
+	return NexusSceneUtils.sort_gltf_paths_with_placeholder_defer(blocking)
 
 func _queue_blocking_composition_dependencies() -> bool:
 	var blocking := _collect_unready_composition_dependencies()
@@ -317,8 +297,7 @@ func _queue_blocking_composition_dependencies() -> bool:
 	if not queued:
 		if blocking.is_empty():
 			return false
-		# Dependencies are already queued but wave 2 is still blocked; ensure phased
-		# reimport keeps running instead of logging forever without progress.
+		# Wave 2 still blocked; keep phased reimport running.
 		if not has_pending_paths():
 			return false
 		if _reimport_phase == PHASE_IDLE:
@@ -338,7 +317,6 @@ func _queue_blocking_composition_dependencies() -> bool:
 		% [blocking.size(), ", ".join(names)]
 	)
 	return true
-
 
 func _log_deferred_composition_wave_blocked() -> void:
 	if _composition_wave_wait_log_frames > 0:
@@ -364,7 +342,6 @@ func _log_deferred_composition_wave_blocked() -> void:
 		% [", ".join(waiting), extra]
 	)
 
-
 func _erase_deferred_composition_path(canonical: String) -> void:
 	for i in range(_deferred_composition_gltf_paths.size() - 1, -1, -1):
 		var existing := NexusUtils.to_res_gltf_path(_deferred_composition_gltf_paths[i])
@@ -373,15 +350,13 @@ func _erase_deferred_composition_path(canonical: String) -> void:
 		if existing == canonical:
 			_deferred_composition_gltf_paths.remove_at(i)
 
-
 func remove_gltf_from_queue(gltf_path: String) -> void:
 	_non_texture_paths.erase(gltf_path)
-
 
 func tick_phased_reimport() -> bool:
 	if _batch_reimport_active:
 		return false
-	if _config_wave_pending() and not NexusImportContext.is_instance_pass_active():
+	if is_config_wave_pending() and not NexusImportContext.is_instance_pass_active():
 		return false
 	if not _reimport_pending and _reimport_phase > PHASE_IDLE:
 		_reimport_pending = true
@@ -401,9 +376,12 @@ func tick_phased_reimport() -> bool:
 					_reimport_pending = false
 					if not _deferred_composition_gltf_paths.is_empty():
 						_request_composition_wave()
-					elif not _deferred_multimesh_paths.is_empty():
+					if not _deferred_multimesh_paths.is_empty():
 						_request_multimesh_wave()
-					else:
+					if (
+						_deferred_composition_gltf_paths.is_empty()
+						and _deferred_multimesh_paths.is_empty()
+					):
 						_request_composition_inherited_scene_queue()
 		return true
 	if has_pending_paths():
@@ -412,10 +390,8 @@ func tick_phased_reimport() -> bool:
 		return true
 	return false
 
-
 func on_resources_reimporting(_resources: PackedStringArray) -> void:
 	_reimport_in_progress = true
-
 
 func finish_reimport_signal() -> void:
 	_batch_reimport_active = false
@@ -423,10 +399,8 @@ func finish_reimport_signal() -> void:
 	_reimport_in_progress = false
 	_reimport_pending = false
 
-
 func has_deferred_mass_import_work() -> bool:
 	return not _deferred_config_paths.is_empty() or not _deferred_wrapper_paths.is_empty()
-
 
 func flush_mass_import_post_processing(wrapper_builder: NexusWrapperBuilder) -> void:
 	if _deferred_config_paths.is_empty() and _deferred_wrapper_paths.is_empty():
@@ -440,7 +414,7 @@ func flush_mass_import_post_processing(wrapper_builder: NexusWrapperBuilder) -> 
 			_pending_reimport_after_signal[path] = true
 			print_rich("[color=yellow]Nexus:[/color] Config updated for %s." % path.get_file())
 
-	var wrapper_paths := NexusExportOrder.sort_gltf_paths(_deferred_wrapper_paths.duplicate())
+	var wrapper_paths := NexusSceneUtils.sort_gltf_paths_with_placeholder_defer(_deferred_wrapper_paths.duplicate())
 	_deferred_wrapper_paths.clear()
 	var queued_wrappers := 0
 	for path in wrapper_paths:
@@ -464,7 +438,7 @@ func flush_mass_import_post_processing(wrapper_builder: NexusWrapperBuilder) -> 
 	_request_composition_inherited_scene_queue()
 
 	if not _pending_reimport_after_signal.is_empty():
-		cooldown_remaining = SAFETY_FRAMES * 2
+		cooldown_remaining = SAFETY_FRAMES_HEAVY * 2
 		_pending_flush_ready = false
 		var timer = _plugin.get_tree().create_timer(FLUSH_FALLBACK_TIMEOUT)
 		timer.timeout.connect(_on_flush_fallback_timeout)
@@ -482,7 +456,6 @@ func queue_wrapper_fixup_for_paths(
 				queued += 1
 	return queued
 
-
 func queue_composition_inherited_scenes_from_index(wrapper_builder: NexusWrapperBuilder) -> int:
 	if not NexusPaths.auto_import_enabled():
 		return 0
@@ -490,7 +463,6 @@ func queue_composition_inherited_scenes_from_index(wrapper_builder: NexusWrapper
 	var evaluation := _evaluate_composition_inherited_scene_candidates(wrapper_builder, true)
 	_log_composition_scene_queue_summary(evaluation)
 	return evaluation.ready_to_queue.size()
-
 
 func queue_multimesh_inherited_scenes_from_paths(
 	wrapper_builder: NexusWrapperBuilder, gltf_paths: PackedStringArray
@@ -504,13 +476,11 @@ func queue_multimesh_inherited_scenes_from_paths(
 	_log_multimesh_scene_queue_summary(evaluation)
 	return evaluation.ready_to_queue.size()
 
-
 func queue_multimesh_inherited_scenes_from_index(wrapper_builder: NexusWrapperBuilder) -> int:
 	var paths: PackedStringArray = []
 	for gltf_path in _multimesh_paths_from_index():
 		paths.append(gltf_path)
 	return queue_multimesh_inherited_scenes_from_paths(wrapper_builder, paths)
-
 
 func has_pending_inherited_scene_work(wrapper_builder: NexusWrapperBuilder) -> bool:
 	if not NexusPaths.auto_import_enabled():
@@ -529,12 +499,10 @@ func has_pending_inherited_scene_work(wrapper_builder: NexusWrapperBuilder) -> b
 		or not multimesh_eval.waiting_on_import.is_empty()
 	)
 
-
 func has_pending_composition_scene_work(wrapper_builder: NexusWrapperBuilder) -> bool:
 	if has_deferred_composition_paths() or has_deferred_multimesh_paths():
 		return true
 	return has_pending_inherited_scene_work(wrapper_builder)
-
 
 func _composition_paths_from_index() -> Array[String]:
 	var asset_index := NexusUtils.load_index_json(
@@ -581,7 +549,6 @@ func _composition_paths_from_index() -> Array[String]:
 	)
 	return composition_paths
 
-
 func _evaluate_composition_inherited_scene_candidates(
 	wrapper_builder: NexusWrapperBuilder,
 	do_queue: bool
@@ -615,7 +582,6 @@ func _evaluate_composition_inherited_scene_candidates(
 		"skipped_bloated": skipped_bloated,
 		"skipped_up_to_date": skipped_up_to_date,
 	}
-
 
 func _log_composition_scene_queue_summary(evaluation: Dictionary) -> void:
 	var queued_count: int = evaluation.get("ready_to_queue", []).size()
@@ -651,7 +617,6 @@ func _log_composition_scene_queue_summary(evaluation: Dictionary) -> void:
 		parts.append("skipped_up_to_date: [%s]" % ", ".join(up_to_date))
 	print_rich("[color=cyan]Nexus Reimport:[/color] Composition inherited scenes: %s." % ", ".join(parts))
 
-
 func _multimesh_paths_from_index() -> Array[String]:
 	var asset_index := NexusUtils.load_index_json(
 		NexusPaths.asset_index_path(),
@@ -679,8 +644,7 @@ func _multimesh_paths_from_index() -> Array[String]:
 	var paths: Array[String] = []
 	for key in by_canonical.keys():
 		paths.append(key)
-	return NexusExportOrder.sort_gltf_paths(paths)
-
+	return NexusSceneUtils.sort_gltf_paths_with_placeholder_defer(paths)
 
 func _evaluate_multimesh_inherited_scene_candidates(
 	wrapper_builder: NexusWrapperBuilder,
@@ -731,7 +695,6 @@ func _evaluate_multimesh_inherited_scene_candidates(
 		"skipped_up_to_date": skipped_up_to_date,
 	}
 
-
 func _log_multimesh_scene_queue_summary(evaluation: Dictionary) -> void:
 	var queued_count: int = evaluation.get("ready_to_queue", []).size()
 	var waiting_sources: Array = evaluation.get("waiting_on_sources", [])
@@ -756,7 +719,6 @@ func _log_multimesh_scene_queue_summary(evaluation: Dictionary) -> void:
 	if not up_to_date.is_empty():
 		parts.append("skipped_up_to_date: [%s]" % ", ".join(up_to_date))
 	print_rich("[color=cyan]Nexus Reimport:[/color] MultiMesh inherited scenes: %s." % ", ".join(parts))
-
 
 func on_resources_reimported(
 	resources: PackedStringArray,
@@ -804,10 +766,7 @@ func on_resources_reimported(
 							)
 						else:
 							skip_flushed = not NexusSceneUtils.gltf_needs_reimport(path)
-							# A deleted wrapper (.tscn removed via the FileSystem dock) must be
-							# recreated even if a previous mass-import wave already flushed it.
-							# _mass_import_wrapper_flushed is only cleared by a new batch flush, so
-							# an FS-watcher reimport after deletion would otherwise skip it.
+							# Missing .tscn after FS delete must recreate even if mass-import flushed.
 							var flushed_tscn := NexusPaths.scene_path_for(
 								path, NexusSceneUtils.preferred_scene_style_for_gltf(path)
 							)
@@ -826,7 +785,7 @@ func on_resources_reimported(
 				activity_detected = true
 		_finish_batch_paths_from_signal(resources, wrapper_builder)
 		if activity_detected:
-			cooldown_remaining = SAFETY_FRAMES
+			cooldown_remaining = SAFETY_FRAMES_ASSET
 		return activity_detected
 
 	for path in resources:
@@ -876,9 +835,8 @@ func on_resources_reimported(
 
 	_finish_batch_paths_from_signal(resources, wrapper_builder)
 	if activity_detected:
-		cooldown_remaining = SAFETY_FRAMES
+		cooldown_remaining = SAFETY_FRAMES_ASSET
 	return activity_detected
-
 
 func _finish_batch_paths_from_signal(
 	resources: PackedStringArray, wrapper_builder: NexusWrapperBuilder = null
@@ -918,7 +876,6 @@ func _finish_batch_paths_from_signal(
 		elif not _deferred_multimesh_paths.is_empty():
 			_request_multimesh_wave()
 
-
 func queue_multimesh_manifest_reimport(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
@@ -935,7 +892,6 @@ func queue_multimesh_manifest_reimport(gltf_path: String) -> void:
 		_reimport_phase = PHASE_GLTF
 	_reimport_pending = true
 
-
 func queue_paths(paths: Array) -> void:
 	if NexusBatchLock.is_active():
 		NexusBatchLock.defer_paths(paths)
@@ -946,7 +902,6 @@ func queue_paths(paths: Array) -> void:
 	_sort_gltf_queue()
 	if _reimport_phase == PHASE_IDLE:
 		_reimport_phase = _initial_reimport_phase()
-
 
 func queue_phased_paths(texture_paths: Array, gltf_paths: Array) -> void:
 	if NexusBatchLock.is_active():
@@ -964,9 +919,8 @@ func queue_phased_paths(texture_paths: Array, gltf_paths: Array) -> void:
 	if _reimport_phase == PHASE_IDLE:
 		_reimport_phase = _initial_reimport_phase()
 
-
 func seed_deferred_composition_paths(paths: Array) -> int:
-	var sorted := NexusExportOrder.sort_gltf_paths(paths)
+	var sorted := NexusSceneUtils.sort_gltf_paths_with_placeholder_defer(paths)
 	var added := 0
 	for path in sorted:
 		if not path is String or path.is_empty():
@@ -981,9 +935,8 @@ func seed_deferred_composition_paths(paths: Array) -> int:
 			added += 1
 	return added
 
-
 func seed_deferred_multimesh_paths(paths: Array) -> int:
-	var sorted := NexusExportOrder.sort_gltf_paths(paths)
+	var sorted := NexusSceneUtils.sort_gltf_paths_with_placeholder_defer(paths)
 	var added := 0
 	for path in sorted:
 		if not path is String or path.is_empty():
@@ -997,7 +950,6 @@ func seed_deferred_multimesh_paths(paths: Array) -> int:
 			_deferred_multimesh_paths.append(canonical)
 			added += 1
 	return added
-
 
 func queue_phased_reimport_from_gltf_paths(texture_paths: Array, gltf_paths: Array) -> void:
 	if NexusBatchLock.is_active():
@@ -1021,14 +973,12 @@ func queue_phased_reimport_from_gltf_paths(texture_paths: Array, gltf_paths: Arr
 			% multimesh_added
 		)
 
-
 func queue_catchup_reimport(texture_paths: Array, gltf_paths: Array) -> void:
 	if NexusBatchLock.is_active():
 		NexusBatchLock.defer_paths(texture_paths)
 		NexusBatchLock.defer_paths(gltf_paths)
 		return
 	queue_phased_paths(texture_paths, gltf_paths)
-
 
 func collect_stale_paths(candidates: Array[String], asset_index: Dictionary) -> Array[String]:
 	var stale_paths: Array[String] = []
@@ -1058,9 +1008,7 @@ func collect_stale_paths(candidates: Array[String], asset_index: Dictionary) -> 
 		if NexusSceneUtils.is_gltf_stale_for_catchup(canonical, index_entry):
 			seen[canonical] = true
 			stale_paths.append(canonical)
-		# A wrapper/inherited scene that should exist but is missing (e.g. deleted via
-		# the FileSystem dock) must be recreated on startup even if the glTF itself is
-		# up to date. is_gltf_stale_for_catchup only covers .import/mtime/hash drift.
+		# Missing packed scene must recreate even when the glTF itself is current.
 		if NexusSceneUtils.should_create_packed_scene(canonical):
 			var startup_tscn := NexusPaths.scene_path_for(
 				canonical, NexusSceneUtils.preferred_scene_style_for_gltf(canonical)
@@ -1069,7 +1017,6 @@ func collect_stale_paths(candidates: Array[String], asset_index: Dictionary) -> 
 				seen[canonical] = true
 				stale_paths.append(canonical)
 	return stale_paths
-
 
 func collect_startup_stale_paths() -> Dictionary:
 	var asset_index := NexusUtils.load_index_json(
@@ -1095,7 +1042,6 @@ func collect_startup_stale_paths() -> Dictionary:
 
 	return {"gltf_paths": collect_stale_paths(candidates, asset_index)}
 
-
 func collect_stale_index_reimport_paths(_wrapper_builder: NexusWrapperBuilder) -> Dictionary:
 	var startup := collect_startup_stale_paths()
 	var gltf_paths: Array = startup.get("gltf_paths", [])
@@ -1113,11 +1059,33 @@ func collect_stale_index_reimport_paths(_wrapper_builder: NexusWrapperBuilder) -
 		"texture_paths": texture_paths,
 	}
 
-
-func queue_indexed_dependents_for_changed(changed_gltf_paths: Array) -> int:
+func queue_indexed_dependents_for_changed(
+	changed_gltf_paths: Array, wrapper_builder: NexusWrapperBuilder = null
+) -> int:
 	var dependents := NexusSceneUtils.find_indexed_dependents_for_changed_gltfs(changed_gltf_paths)
 	if dependents.is_empty():
 		return 0
+	if wrapper_builder != null:
+		var kept: Array[String] = []
+		for path in dependents:
+			if not path is String or path.is_empty():
+				continue
+			var canonical := NexusUtils.to_res_gltf_path(path)
+			if canonical.is_empty():
+				canonical = path
+			if wrapper_builder.is_inherited_aborted(canonical):
+				# Multimesh must rebuild when sources get Nexus materials; composition abort stays.
+				if NexusSceneUtils.is_multimesh_manifest(canonical):
+					wrapper_builder.clear_inherited_abort(canonical)
+					NexusSceneUtils.invalidate_multimesh_pipeline_cache(canonical)
+				else:
+					continue
+			elif NexusSceneUtils.is_multimesh_manifest(canonical):
+				NexusSceneUtils.invalidate_multimesh_pipeline_cache(canonical)
+			kept.append(canonical)
+		dependents = kept
+		if dependents.is_empty():
+			return 0
 	var split := NexusSceneUtils.split_gltf_paths_for_phased_reimport(dependents)
 	var added := seed_deferred_composition_paths(split.get("deferred_composition", []))
 	added += seed_deferred_multimesh_paths(split.get("deferred_multimesh", []))
@@ -1127,6 +1095,12 @@ func queue_indexed_dependents_for_changed(changed_gltf_paths: Array) -> int:
 		var canonical := NexusUtils.to_res_gltf_path(path)
 		if canonical.is_empty():
 			canonical = path
+		if wrapper_builder != null and wrapper_builder.is_inherited_aborted(canonical):
+			if NexusSceneUtils.is_multimesh_manifest(canonical):
+				wrapper_builder.clear_inherited_abort(canonical)
+				NexusSceneUtils.invalidate_multimesh_pipeline_cache(canonical)
+			else:
+				continue
 		if canonical in _non_texture_paths:
 			continue
 		_non_texture_paths.append(canonical)
@@ -1141,7 +1115,6 @@ func queue_indexed_dependents_for_changed(changed_gltf_paths: Array) -> int:
 		)
 	return added
 
-
 func apply_stale_catchup(
 	stale: Dictionary, _wrapper_builder: NexusWrapperBuilder, use_mass_import: bool = false
 ) -> bool:
@@ -1155,19 +1128,17 @@ func apply_stale_catchup(
 		queue_catchup_reimport([], gltf_paths)
 	return true
 
-
-const _DEPENDENT_EXPORT_TYPES: Array[String] = ["COMBINED_ASSET", "LEVEL", "MULTIMESH_MANIFEST"]
+const _DEPENDENT_EXPORT_TYPES: Array[String] = ["COMBINED_ASSET", "ANIMATION_LIB", "MULTIMESH_MANIFEST", "LEVEL"]
 
 const _DEPENDENT_EXPORT_TYPE_ORDER: Dictionary = {
 	"COMBINED_ASSET": 0,
-	"MULTIMESH_MANIFEST": 1,
-	"LEVEL": 2,
+	"ANIMATION_LIB": 1,
+	"MULTIMESH_MANIFEST": 2,
+	"LEVEL": 3,
 }
-
 
 func _dependent_export_type_priority(export_type: String) -> int:
 	return int(_DEPENDENT_EXPORT_TYPE_ORDER.get(export_type, 99))
-
 
 func queue_dependent_gltfs_from_index() -> int:
 	var asset_index := NexusUtils.load_index_json(
@@ -1218,7 +1189,6 @@ func queue_dependent_gltfs_from_index() -> int:
 		_reimport_phase = PHASE_GLTF
 	return queued
 
-
 func apply_deferred_config_writes() -> void:
 	if NexusBatchLock.is_active():
 		_plugin.call_deferred("_nexus_apply_deferred_config_writes")
@@ -1237,11 +1207,10 @@ func apply_deferred_config_writes() -> void:
 			_pending_reimport_after_signal[path] = true
 			print_rich("[color=yellow]Nexus:[/color] Config updated for %s." % path.get_file())
 	if not paths.is_empty():
-		cooldown_remaining = SAFETY_FRAMES * 2
+		cooldown_remaining = SAFETY_FRAMES_HEAVY * 2
 		_pending_flush_ready = false
 		var timer = _plugin.get_tree().create_timer(FLUSH_FALLBACK_TIMEOUT)
 		timer.timeout.connect(_on_flush_fallback_timeout)
-
 
 func flush_pending_reimport_queue(just_reimported: Array) -> void:
 	if _pending_reimport_after_signal.is_empty():
@@ -1269,7 +1238,6 @@ func flush_pending_reimport_queue(just_reimported: Array) -> void:
 		_reimport_phase = _initial_reimport_phase()
 	_pending_reimport_after_signal.clear()
 	_pending_flush_ready = false
-
 
 func fix_import_config_if_needed(gltf_path: String, do_write: bool = true) -> bool:
 	if not FileAccess.file_exists(gltf_path):
@@ -1336,26 +1304,39 @@ func fix_import_config_if_needed(gltf_path: String, do_write: bool = true) -> bo
 			return false
 	return true
 
-
 func _reimport_safe_async_batch(paths: Array) -> void:
 	if NexusBatchLock.is_active():
 		NexusBatchLock.defer_paths(paths)
-		_reimport_pending = false
-		return
-	for i in REIMPORT_DELAY:
-		await _plugin.get_tree().process_frame
-	var fs = _plugin.get_editor_interface().get_resource_filesystem()
-	if fs.is_scanning():
-		queue_paths(paths)
 		_reimport_pending = false
 		return
 	if _reimport_in_progress or _batch_reimport_active:
 		queue_paths(paths)
 		_reimport_pending = false
 		return
-	if _config_wave_pending() and not NexusImportContext.is_instance_pass_active():
+	var fs = _plugin.get_editor_interface().get_resource_filesystem()
+	# Sole call site for EditorFileSystem.reimport_files - never nest from plugin.gd.
+	var settle_frames := 0
+	if fs != null and fs.is_scanning():
+		settle_frames = REIMPORT_DELAY_BUSY
+	for p in paths:
+		_active_batch_paths[p] = true
+	_batch_reimport_active = true
+	_reimport_in_progress = true
+	for i in settle_frames:
+		await _plugin.get_tree().process_frame
+	if fs.is_scanning():
+		queue_paths(paths)
+		_batch_reimport_active = false
+		_reimport_in_progress = false
+		_active_batch_paths.clear()
+		_reimport_pending = false
+		return
+	if is_config_wave_pending() and not NexusImportContext.is_instance_pass_active():
 		for p in paths:
 			_route_path_to_queue(p)
+		_batch_reimport_active = false
+		_reimport_in_progress = false
+		_active_batch_paths.clear()
 		_reimport_pending = false
 		return
 	var path_set: Dictionary = {}
@@ -1367,16 +1348,20 @@ func _reimport_safe_async_batch(paths: Array) -> void:
 		if node.scene_file_path in path_set:
 			selection.remove_node(node)
 			nodes_to_reselect.append(node)
-	_prepare_editor_scenes_for_reimport(paths)
-	for p in paths:
-		_active_batch_paths[p] = true
-	_batch_reimport_active = true
-	_reimport_in_progress = true
+	prepare_editor_scenes_for_reimport(paths)
 	fs.reimport_files(PackedStringArray(paths))
 	if not nodes_to_reselect.is_empty():
 		_plugin.call_deferred("_nexus_restore_selection", nodes_to_reselect)
-	cooldown_remaining = SAFETY_FRAMES
+	cooldown_remaining = _safety_frames_for_paths(paths)
 	_advance_reimport_phase()
+
+
+func _safety_frames_for_paths(paths: Array) -> int:
+	for p in paths:
+		var path := str(p)
+		if NexusSceneUtils.is_composition_gltf(path) or NexusSceneUtils.is_multimesh_manifest(path):
+			return SAFETY_FRAMES_HEAVY
+	return SAFETY_FRAMES_ASSET
 
 
 func _on_flush_fallback_timeout() -> void:
@@ -1398,14 +1383,12 @@ func _on_flush_fallback_timeout() -> void:
 	_pending_reimport_after_signal.clear()
 	_pending_flush_ready = false
 
-
 func _route_path_to_queue(path: String) -> void:
 	if _is_texture_path(path):
 		if path not in _texture_paths:
 			_texture_paths.append(path)
 	else:
 		_route_gltf_path_to_queue(path)
-
 
 func _route_gltf_path_to_queue(path: String) -> void:
 	if path.is_empty():
@@ -1424,10 +1407,8 @@ func _route_gltf_path_to_queue(path: String) -> void:
 	if canonical not in _non_texture_paths:
 		_non_texture_paths.append(canonical)
 
-
 func _sort_gltf_queue() -> void:
-	_non_texture_paths = NexusExportOrder.sort_gltf_paths(_non_texture_paths)
-
+	_non_texture_paths = NexusSceneUtils.sort_gltf_paths_with_placeholder_defer(_non_texture_paths)
 
 func _initial_reimport_phase() -> int:
 	if not _texture_paths.is_empty():
@@ -1435,7 +1416,6 @@ func _initial_reimport_phase() -> int:
 	if not _non_texture_paths.is_empty():
 		return PHASE_GLTF
 	return PHASE_IDLE
-
 
 func _advance_reimport_phase() -> void:
 	match _reimport_phase:
@@ -1447,9 +1427,12 @@ func _advance_reimport_phase() -> void:
 				_reimport_pending = false
 				if not _deferred_composition_gltf_paths.is_empty():
 					_request_composition_wave()
-				elif not _deferred_multimesh_paths.is_empty():
+				if not _deferred_multimesh_paths.is_empty():
 					_request_multimesh_wave()
-				else:
+				if (
+					_deferred_composition_gltf_paths.is_empty()
+					and _deferred_multimesh_paths.is_empty()
+				):
 					_request_composition_inherited_scene_queue()
 		PHASE_GLTF:
 			if _non_texture_paths.is_empty():
@@ -1457,46 +1440,41 @@ func _advance_reimport_phase() -> void:
 				_reimport_pending = false
 				if not _deferred_composition_gltf_paths.is_empty():
 					_request_composition_wave()
-				elif not _deferred_multimesh_paths.is_empty():
+				if not _deferred_multimesh_paths.is_empty():
 					_request_multimesh_wave()
-				else:
+				if (
+					_deferred_composition_gltf_paths.is_empty()
+					and _deferred_multimesh_paths.is_empty()
+				):
 					_request_composition_inherited_scene_queue()
-
 
 func _request_multimesh_wave() -> void:
 	if _plugin and _plugin.has_method("request_multimesh_wave"):
 		_plugin.request_multimesh_wave()
 
-
 func _request_multimesh_inherited_scene_queue() -> void:
 	if _plugin and _plugin.has_method("request_multimesh_inherited_scene_queue"):
 		_plugin.request_multimesh_inherited_scene_queue()
-
 
 func _request_composition_inherited_scene_queue() -> void:
 	if _plugin and _plugin.has_method("request_composition_inherited_scene_queue"):
 		_plugin.request_composition_inherited_scene_queue()
 
-
 func _request_composition_wave() -> void:
 	if _plugin and _plugin.has_method("request_composition_wave"):
 		_plugin.request_composition_wave()
-
 
 func _is_texture_path(path: String) -> bool:
 	var ext = path.get_extension().to_lower()
 	return ext in ["png", "jpg", "jpeg", "webp"]
 
-
 func _is_gltf_path(path: String) -> bool:
 	var ext = path.get_extension().to_lower()
 	return ext == "gltf" or ext == "glb"
 
-
 func _is_multimesh_manifest(gltf_path: String) -> bool:
 	var meta = NexusUtils.get_nexus_metadata(gltf_path)
 	return meta.get("export_type") == "MULTIMESH_MANIFEST"
-
 
 func _gltf_has_tangent_attributes(gltf_path: String) -> bool:
 	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
@@ -1504,14 +1482,12 @@ func _gltf_has_tangent_attributes(gltf_path: String) -> bool:
 	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
 	return not json_text.is_empty() and "\"TANGENT\"" in json_text
 
-
 func _has_custom_lods(gltf_path: String) -> bool:
 	const SEARCH = "nexus_is_lod"
 	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
 		return false
 	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
 	return not json_text.is_empty() and SEARCH in json_text
-
 
 func prime_nexus_import_configs() -> int:
 	_purge_binary_import_sidecars()
@@ -1541,28 +1517,20 @@ func prime_nexus_import_configs() -> int:
 		if _prime_import_config_for_path(gltf_path, reimport_paths):
 			updated += 1
 
-	# A config rewrite changes import params (root_type, import_script). The
-	# cached scene still reflects the previous params, so a reimport is mandatory.
-	# fs.update_file alone does not force one, so route through the phased
-	# reimport queue (fs.reimport_files) to rebuild the scene with the new config.
+	# Config rewrite requires reimport; fs.update_file alone is not enough.
 	if not reimport_paths.is_empty():
 		queue_catchup_reimport([], reimport_paths)
 	return updated
-
 
 func _prime_import_config_for_path(
 	gltf_path: String, reimport_paths: Array[String]
 ) -> bool:
 	if not fix_import_config_if_needed(gltf_path, true):
 		return false
-	# fix_import_config_if_needed returns true only when it actually rewrote the
-	# sidecar (drift or corrupt config), so the cached scene is now stale. Always
-	# queue a reimport; the fresh .import mtime would otherwise hide the need and
-	# the file would be wrongly marked stabilized without ever being reimported.
+	# Sidecar rewrite makes the cached scene stale; always queue reimport.
 	if gltf_path not in reimport_paths:
 		reimport_paths.append(gltf_path)
 	return true
-
 
 func _index_entries_by_gltf_path(asset_index: Dictionary) -> Dictionary:
 	var result: Dictionary = {}
@@ -1577,7 +1545,6 @@ func _index_entries_by_gltf_path(asset_index: Dictionary) -> Dictionary:
 		result[gltf_path] = entry
 	return result
 
-
 func _discover_nexus_gltf_paths() -> Array[String]:
 	var paths: Array[String] = []
 	var props_root := _props_root_dir()
@@ -1586,13 +1553,11 @@ func _discover_nexus_gltf_paths() -> Array[String]:
 	_collect_nexus_gltf_paths(props_root, paths)
 	return paths
 
-
 func _props_root_dir() -> String:
 	for candidate in ["res://props", "res://assets"]:
 		if DirAccess.dir_exists_absolute(candidate):
 			return candidate
 	return ""
-
 
 func _collect_nexus_gltf_paths(dir_path: String, out: Array[String]) -> void:
 	var dir = DirAccess.open(dir_path)
@@ -1613,12 +1578,10 @@ func _collect_nexus_gltf_paths(dir_path: String, out: Array[String]) -> void:
 		name = dir.get_next()
 	dir.list_dir_end()
 
-
 func _purge_binary_import_sidecars() -> void:
 	for root in ["res://props", "res://assets", "res://textures"]:
 		if DirAccess.dir_exists_absolute(root):
 			_purge_binary_import_sidecars_in_dir(root)
-
 
 func _purge_binary_import_sidecars_in_dir(dir_path: String) -> void:
 	var dir = DirAccess.open(dir_path)
@@ -1644,7 +1607,6 @@ func _purge_binary_import_sidecars_in_dir(dir_path: String) -> void:
 		name = dir.get_next()
 	dir.list_dir_end()
 
-
 func _salvage_sidecar_fields(config: ConfigFile, import_path: String) -> void:
 	var text := NexusUtils.read_utf8_text(import_path)
 	if text.is_empty():
@@ -1665,7 +1627,6 @@ func _salvage_sidecar_fields(config: ConfigFile, import_path: String) -> void:
 		if key.is_empty():
 			continue
 		config.set_value(section, key, value)
-
 
 func _unquote_sidecar_value(value: String) -> Variant:
 	if value.begins_with("[") and value.ends_with("]"):
@@ -1698,7 +1659,6 @@ func _unquote_sidecar_value(value: String) -> Variant:
 	if value == "null":
 		return null
 	return value
-
 
 func _root_type_string(nexus_type: String) -> String:
 	# VehicleBody3D is not supported by the glTF importer; post-import replaces RigidBody3D.

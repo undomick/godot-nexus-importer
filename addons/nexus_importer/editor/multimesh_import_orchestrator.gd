@@ -3,24 +3,17 @@ extends RefCounted
 
 ## Single state machine for MultiMesh manifest import and inherited scene creation.
 
-const NexusImportContext = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
-const NexusSceneUtils = preload("res://addons/nexus_importer/scripts/nexus_scene_utils.gd")
-
 var _plugin: EditorPlugin
-
 
 func _init(plugin: EditorPlugin) -> void:
 	_plugin = plugin
-
 
 func begin_manifest_wave() -> void:
 	NexusImportContext.set_mass_import_active(false)
 	NexusImportContext.set_multimesh_wave_active(true)
 
-
 func end_manifest_wave() -> void:
 	NexusImportContext.set_multimesh_wave_active(false)
-
 
 func advance_manifest(
 	gltf_path: String,
@@ -50,7 +43,6 @@ func advance_manifest(
 			return true
 	return false
 
-
 func advance_inherited(gltf_path: String, wrapper_builder: NexusWrapperBuilder) -> bool:
 	if gltf_path.is_empty() or not NexusSceneUtils.is_multimesh_manifest(gltf_path):
 		return false
@@ -65,7 +57,6 @@ func advance_inherited(gltf_path: String, wrapper_builder: NexusWrapperBuilder) 
 		return false
 	return wrapper_builder.queue_scene(gltf_path)
 
-
 func on_manifest_reimport_done(
 	paths: PackedStringArray,
 	reimport_manager: NexusReimportManager,
@@ -76,8 +67,7 @@ func on_manifest_reimport_done(
 	for path in paths:
 		if path.is_empty() or not NexusSceneUtils.is_multimesh_manifest(path):
 			continue
-		# A fresh manifest reimport is the user's retry signal — clear any prior
-		# inherited-open timeout abort so the build can be attempted again.
+		# Fresh manifest reimport clears a prior open-timeout abort.
 		wrapper_builder.clear_inherited_abort(path)
 		if NexusSceneUtils.multimesh_manifest_import_complete(path):
 			NexusImportContext.clear_multimesh_retry(path)
@@ -86,7 +76,6 @@ func on_manifest_reimport_done(
 		elif NexusSceneUtils.multimesh_pipeline_stage(path).get("stage") == NexusSceneUtils.MULTIMESH_STAGE_MANIFEST:
 			advance_manifest(path, reimport_manager)
 	return queued
-
 
 func advance_pending_from_index(
 	wrapper_builder: NexusWrapperBuilder,
@@ -107,7 +96,6 @@ func advance_pending_from_index(
 			advance_manifest(gltf_path, reimport_manager)
 	return queued
 
-
 func handle_inherited_failure(
 	gltf_path: String,
 	reimport_manager: NexusReimportManager,
@@ -127,7 +115,6 @@ func handle_inherited_failure(
 			"Nexus MultiMesh: Inherited scene failed for '%s': %s"
 			% [gltf_path.get_file(), reason]
 		)
-
 
 func _multimesh_paths_from_index() -> Array[String]:
 	var asset_index := NexusUtils.load_index_json(
@@ -156,7 +143,6 @@ func _multimesh_paths_from_index() -> Array[String]:
 	for key in by_canonical.keys():
 		paths.append(key)
 	return paths
-
 
 func _request_multimesh_wave() -> void:
 	if _plugin and _plugin.has_method("request_multimesh_wave"):

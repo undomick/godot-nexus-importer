@@ -8,7 +8,7 @@ const NexusWrapperBuilderScript = preload("res://addons/nexus_importer/editor/ne
 const NexusAssetToolsScript = preload("res://addons/nexus_importer/editor/nexus_asset_tools.gd")
 const NexusInstanceFixupScript = preload("res://addons/nexus_importer/editor/nexus_instance_fixup.gd")
 const NexusBatchLockScript = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
-const NexusEditorSceneGuard = preload(
+const NexusEditorSceneGuardScript = preload(
 	"res://addons/nexus_importer/editor/nexus_editor_scene_guard.gd"
 )
 const NexusImportContextScript = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
@@ -40,13 +40,7 @@ var _composition_scene_queue_pending: bool = false
 var _multimesh_scene_queue_pending: bool = false
 var _startup_catchup_done: bool = false
 var _multimesh_scan_cooldown_frames: int = 0
-
 var _batch_lock_scene_guard_applied: bool = false
-
-# FS-Reimport (Rechtsklick->Reimport / reimport_files) of a composition whose
-# instance dependencies are NOT in the same reimport batch must resolve non-deferred,
-# otherwise _post_import leaves placeholders in the .import (Bild 2) and the deferred
-# instance pass is starved. Tracks the flag lifecycle for this signal-driven path.
 var _fs_comp_resolution_reimport_active: bool = false
 
 
@@ -124,7 +118,7 @@ func _process(_delta):
 	if batch_locked:
 		if not _batch_lock_scene_guard_applied:
 			_batch_lock_scene_guard_applied = true
-			NexusEditorSceneGuard.close_open_nexus_asset_tabs_if_any(get_editor_interface())
+			NexusEditorSceneGuardScript.close_open_nexus_asset_tabs_if_any(get_editor_interface())
 		_batch_lock_was_active = true
 		return
 	_batch_lock_scene_guard_applied = false
@@ -143,7 +137,7 @@ func _process(_delta):
 		_multimesh_scan_cooldown_frames -= 1
 
 	if fs.is_scanning():
-		_reimport_manager.cooldown_remaining = 10
+		_reimport_manager.cooldown_remaining = 3
 		return
 
 	if _wrapper_builder.has_pending() or _wrapper_builder.is_busy():
@@ -175,7 +169,10 @@ func _process(_delta):
 		_schedule_next_instance_pass_fixup()
 		return
 
-	_try_queue_composition_wave()
+	# Wave2/3 only when Wave1 queues are empty (avoids empty checks every idle frame).
+	if not _reimport_manager.has_pending_paths():
+		_try_queue_composition_wave()
+		_try_queue_multimesh_wave()
 	_try_finalize_mass_import_when_idle()
 	_try_start_deferred_instance_pass()
 	_try_queue_pending_multimesh_inherited_scenes()
@@ -388,9 +385,8 @@ func _on_resources_reimporting(_resources: PackedStringArray):
 	if NexusImportContextScript.is_instance_pass_active():
 		return
 	if NexusImportContextScript.is_composition_resolution_reimport():
-		# Forced non-deferred composition reimport (instance resolution before
-		# inherited build): keep mass-import off so _post_import resolves
-		# placeholders in the .import instead of deferring them.
+		# Keep abort gate in sync: resources_reimported must see resolution mode.
+		_fs_comp_resolution_reimport_active = true
 		NexusImportContextScript.set_mass_import_active(false)
 		_reimport_manager.on_resources_reimporting(_resources)
 		return
@@ -405,11 +401,6 @@ func _on_resources_reimporting(_resources: PackedStringArray):
 		_reimport_manager.on_resources_reimporting(_resources)
 		return
 	if _batch_is_composition_fs_reimport(gltf_paths):
-		# Single/batch FS-Reimport of composition(s) whose instance dependencies are
-		# not in this batch: resolve non-deferred so _post_import bakes resolved
-		# instances into the .import (Bild 1). Deferring here leaves placeholders
-		# (Bild 2) and the dependents-only wave never reimports the composition
-		# itself, so the deferred instance pass is starved.
 		_fs_comp_resolution_reimport_active = true
 		NexusImportContextScript.set_composition_resolution_reimport(true)
 		NexusImportContextScript.set_mass_import_active(false)
@@ -419,10 +410,6 @@ func _on_resources_reimporting(_resources: PackedStringArray):
 	_reimport_manager.on_resources_reimporting(_resources)
 
 
-# FS-Reimport of a composition resolves non-deferred when none of the batch's
-# compositions have an instance dependency also present in the batch. If a dep is
-# in the batch, keep the deferred mass-import path (avoids load-during-reimport
-# deadlocks for the dependency).
 func _batch_is_composition_fs_reimport(gltf_paths: Array) -> bool:
 	var batch_set: Dictionary = {}
 	var has_composition := false
@@ -473,12 +460,18 @@ func _collect_gltf_paths_from_resources(resources: PackedStringArray) -> Array:
 func _on_resources_reimported(resources: PackedStringArray):
 	if _reimport_manager == null or _wrapper_builder == null:
 		return
+	var was_composition_resolution := _fs_comp_resolution_reimport_active
 	if _fs_comp_resolution_reimport_active:
 		_fs_comp_resolution_reimport_active = false
 		NexusImportContextScript.set_composition_resolution_reimport(false)
 	for resource in resources:
 		if NexusSceneUtils.is_multimesh_manifest(resource):
 			NexusSceneUtils.invalidate_multimesh_pipeline_cache(resource)
+		elif (
+			not was_composition_resolution
+			and NexusSceneUtils.is_composition_gltf(resource)
+		):
+			_wrapper_builder.clear_inherited_abort(resource)
 	if not _editor_bootstrap_done:
 		_reimport_manager.finish_reimport_signal()
 		return
@@ -537,6 +530,7 @@ func _flush_batch_deferred_imports() -> void:
 	NexusImportContextScript.set_mass_import_active(true)
 	_reimport_manager.queue_phased_reimport_from_gltf_paths(textures, gltfs)
 	request_composition_inherited_scene_queue()
+	request_multimesh_inherited_scene_queue()
 
 
 func _queue_post_instance_pass_fixup() -> void:
@@ -660,10 +654,6 @@ func ensure_nexus_gltf_imported_async(gltf_path: String) -> bool:
 			return true
 		var composition_resolution := NexusSceneUtils.is_composition_gltf(gltf_path)
 		if composition_resolution:
-			# Reimport the composition non-deferred so _post_import resolves
-			# instance placeholders into the .import; otherwise the inherited
-			# build would open a placeholder glTF and save a broken
-			# instance=ExtResource(gltf) + local _001 override structure.
 			NexusImportContextScript.set_composition_resolution_reimport(true)
 			NexusImportContextScript.set_mass_import_active(false)
 		await _reimport_gltf_and_wait(gltf_path)
@@ -675,32 +665,32 @@ func ensure_nexus_gltf_imported_async(gltf_path: String) -> bool:
 
 
 func request_composition_instance_resolution_reimport(gltf_path: String) -> void:
-	# Safety net for build_inherited_scene_async: force a non-deferred reimport of
-	# a composition whose .import still holds unresolved instance placeholders, so
-	# _post_import resolves them in the .import. The inherited build re-triggers
-	# with a resolved glTF and saves a bare clean instance=ExtResource(gltf).
 	if _reimport_manager == null or gltf_path.is_empty():
 		return
 	if not NexusSceneUtils.is_composition_gltf(gltf_path):
 		return
+	# Never call reimport_files here - Godot forbids nesting inside an active reimport.
+	# Clear resolution flags only from resources_reimported (or fallback below).
 	NexusImportContextScript.set_composition_resolution_reimport(true)
+	_fs_comp_resolution_reimport_active = true
 	NexusImportContextScript.set_mass_import_active(false)
 	_reimport_manager.prepare_editor_scenes_for_reimport([gltf_path])
-	var fs = get_editor_interface().get_resource_filesystem()
-	fs.reimport_files(PackedStringArray([gltf_path]))
+	_reimport_manager.queue_paths([gltf_path])
 	await _wait_for_import_idle()
-	NexusImportContextScript.set_composition_resolution_reimport(false)
+	# Safety: if the reimport signal never ran, do not leave resolution sticky.
+	if _fs_comp_resolution_reimport_active:
+		_fs_comp_resolution_reimport_active = false
+		NexusImportContextScript.set_composition_resolution_reimport(false)
 
 
 func _reimport_gltf_and_wait(gltf_path: String) -> void:
-	if _reimport_manager != null:
-		_reimport_manager.prepare_editor_scenes_for_reimport([gltf_path])
-	if NexusSceneUtils.is_multimesh_manifest(gltf_path) and _reimport_manager != null:
+	if _reimport_manager == null:
+		return
+	_reimport_manager.prepare_editor_scenes_for_reimport([gltf_path])
+	if NexusSceneUtils.is_multimesh_manifest(gltf_path):
 		_reimport_manager.queue_multimesh_manifest_reimport(gltf_path)
 	else:
-		var fs = get_editor_interface().get_resource_filesystem()
-		fs.reimport_files(PackedStringArray([gltf_path]))
-	var fs = get_editor_interface().get_resource_filesystem()
+		_reimport_manager.queue_paths([gltf_path])
 	await _wait_for_import_idle()
 
 
@@ -709,10 +699,10 @@ func _reimport_multimesh_source_dependencies(manifest_gltf_path: String) -> void
 	var dep_gltfs := NexusSceneUtils.resolve_dependency_gltf_paths(asset_ids)
 	if dep_gltfs.is_empty():
 		return
-	if _reimport_manager != null:
-		_reimport_manager.prepare_editor_scenes_for_reimport(dep_gltfs)
-	var fs = get_editor_interface().get_resource_filesystem()
-	fs.reimport_files(PackedStringArray(dep_gltfs))
+	if _reimport_manager == null:
+		return
+	_reimport_manager.prepare_editor_scenes_for_reimport(dep_gltfs)
+	_reimport_manager.queue_paths(dep_gltfs)
 	await _wait_for_import_idle()
 
 
@@ -724,9 +714,12 @@ func _queue_indexed_dependents_for_reimported(resources: PackedStringArray) -> v
 	var gltf_paths := _collect_gltf_paths_from_resources(resources)
 	if gltf_paths.is_empty():
 		return
-	var added := _reimport_manager.queue_indexed_dependents_for_changed(gltf_paths)
+	var added := _reimport_manager.queue_indexed_dependents_for_changed(
+		gltf_paths, _wrapper_builder
+	)
 	if added > 0:
 		request_composition_wave()
+		request_multimesh_inherited_scene_queue()
 
 
 func request_composition_wave() -> void:
@@ -827,6 +820,10 @@ func _show_nexus_notification(message: String, severity: int = 0) -> void:
 	var toaster = get_editor_interface().get_editor_toaster()
 	if toaster and toaster.has_method("push_toast"):
 		toaster.push_toast(message, severity)
+
+
+func is_wrapper_builder_busy() -> bool:
+	return _wrapper_builder != null and _wrapper_builder.is_busy()
 
 
 func queue_scene_creation(gltf_path: String, scene_type: String) -> void:

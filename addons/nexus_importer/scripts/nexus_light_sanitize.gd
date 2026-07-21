@@ -3,8 +3,6 @@ extends RefCounted
 
 ## Sanitize nexus_light metadata before applying Godot Light3D properties.
 
-const NexusTransformSanitize = preload("res://addons/nexus_importer/scripts/nexus_transform_sanitize.gd")
-
 const MIN_RANGE := 0.001
 const MIN_SHADOW_RANGE := 0.05
 const DEFAULT_FINITE_RANGE := 40.0
@@ -15,7 +13,6 @@ const DEFAULT_AREA_ATTENUATION := 1.0
 const VALID_AREA_SHAPES := ["SQUARE", "DISK", "RECTANGLE", "ELLIPSE"]
 const DEFAULT_DIR_SHADOW_DISTANCE := 100.0
 const MIN_BASIS_DETERMINANT := 0.000001
-
 
 static func sanitize_nexus_light_dict(data: Dictionary) -> Dictionary:
 	var out := data.duplicate(true)
@@ -56,31 +53,24 @@ static func sanitize_nexus_light_dict(data: Dictionary) -> Dictionary:
 
 	return out
 
-
 static func sanitize_light_transform(transform: Transform3D) -> Transform3D:
 	return NexusTransformSanitize.sanitize(transform, "light")
-
 
 static func clamp_omni_range(value: float) -> float:
 	return maxf(value, MIN_RANGE)
 
-
 static func clamp_spot_range(value: float) -> float:
 	return maxf(value, MIN_RANGE)
 
-
 static func clamp_spot_angle(value: float) -> float:
 	return clampf(value, MIN_SPOT_ANGLE, MAX_SPOT_ANGLE)
-
 
 static func clamp_area_range(value: float, shadow_enabled: bool = false) -> float:
 	var floor_value := MIN_SHADOW_RANGE if shadow_enabled else MIN_RANGE
 	return maxf(value, floor_value)
 
-
 static func clamp_area_size(size: Vector2) -> Vector2:
 	return Vector2(maxf(size.x, MIN_AREA_AXIS), maxf(size.y, MIN_AREA_AXIS))
-
 
 static func _sanitize_finite_range(value: Variant) -> float:
 	var parsed := float(value)
@@ -88,13 +78,11 @@ static func _sanitize_finite_range(value: Variant) -> float:
 		return DEFAULT_FINITE_RANGE
 	return parsed
 
-
 static func _sanitize_area_size(value: Variant) -> Array:
 	if (value is Array or value is PackedFloat32Array) and value.size() >= 2:
 		var clamped := clamp_area_size(Vector2(float(value[0]), float(value[1])))
 		return [clamped.x, clamped.y]
 	return [1.0, 1.0]
-
 
 static func _sanitize_area_light(out: Dictionary) -> void:
 	out["area_range"] = _sanitize_finite_range(out.get("area_range", DEFAULT_FINITE_RANGE))
@@ -110,20 +98,17 @@ static func _sanitize_area_light(out: Dictionary) -> void:
 	if out.has("light_size"):
 		out["light_size"] = maxf(float(out["light_size"]), 0.0)
 
-
 static func _sanitize_area_shape(value: Variant) -> String:
 	var shape := str(value).to_upper()
 	if shape in VALID_AREA_SHAPES:
 		return shape
 	return "SQUARE"
 
-
 static func _sanitize_area_attenuation(value: Variant) -> float:
 	var parsed := float(value)
 	if not is_finite(parsed):
 		return DEFAULT_AREA_ATTENUATION
 	return maxf(parsed, 0.0)
-
 
 static func _shadow_enabled(data: Dictionary) -> bool:
 	return bool(data.get("shadow_enabled", data.get("use_shadow", false)))

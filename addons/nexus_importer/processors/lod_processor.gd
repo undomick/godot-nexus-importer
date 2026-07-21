@@ -3,22 +3,16 @@ extends Object
 
 ## Applies LOD visibility ranges and shadow proxy linking from nexus metadata.
 
-const NexusVisibilityRange = preload("res://addons/nexus_importer/scripts/nexus_visibility_range.gd")
-
 var _lod_regex: RegEx = RegEx.new()
-
 
 func _init():
 	_lod_regex.compile("^(.*)_LOD\\d+$")
 
-
 func _is_lod_or_shadow_node(node_name: String) -> bool:
 	return _lod_regex.search(node_name) != null or node_name.ends_with("_Shadow")
 
-
 func process(scene_root: Node, stats: Dictionary) -> void:
 	_process_node_recursive(scene_root, stats)
-
 
 func _process_node_recursive(node: Node, stats: Dictionary) -> void:
 	if node is GeometryInstance3D:
@@ -28,7 +22,6 @@ func _process_node_recursive(node: Node, stats: Dictionary) -> void:
 		_process_node_recursive(child, stats)
 
 	_link_shadow_proxies(node)
-
 
 func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary) -> void:
 	var extras = node.get_meta("extras") if node.has_meta("extras") else {}
@@ -46,10 +39,8 @@ func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary) -> void:
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
 		node.visible = true
 
-
 func _apply_visibility_range(node: GeometryInstance3D, range_data: Dictionary) -> void:
 	NexusVisibilityRange.apply_mesh_lod(node, range_data)
-
 
 func _link_shadow_proxies(parent: Node) -> void:
 	var children = parent.get_children()
@@ -80,7 +71,6 @@ func _link_shadow_proxies(parent: Node) -> void:
 		if mesh_end > proxy_end:
 			_update_proxy_range_end(proxy, mesh)
 
-
 func _collect_shadow_proxies(children: Array) -> Dictionary:
 	var shadow_proxies: Dictionary = {}
 	for child in children:
@@ -93,7 +83,6 @@ func _collect_shadow_proxies(children: Array) -> Dictionary:
 		shadow_proxies[base_name] = child
 	return shadow_proxies
 
-
 func _get_nexus_node_meta(node: Node) -> Dictionary:
 	if node.has_meta("extras"):
 		var extras = node.get_meta("extras")
@@ -101,10 +90,8 @@ func _get_nexus_node_meta(node: Node) -> Dictionary:
 			return extras["NEXUS_NODE_METADATA"]
 	return {}
 
-
 func _get_visibility_range_end(node: GeometryInstance3D) -> float:
 	return node.visibility_range_end
-
 
 func _update_proxy_range_end(proxy: GeometryInstance3D, mesh: GeometryInstance3D) -> void:
 	var values := NexusVisibilityRange.sanitize_dict(

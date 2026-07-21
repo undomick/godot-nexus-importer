@@ -624,8 +624,28 @@ static func is_composition_gltf(gltf_path: String) -> bool:
 	return str(meta.get("export_type", "")) in COMPOSITION_EXPORT_TYPES
 
 
+static func is_animation_lib_gltf(gltf_path: String) -> bool:
+	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
+		return false
+	var meta := NexusUtils.get_nexus_metadata(gltf_path)
+	if meta.is_empty():
+		return false
+	return str(meta.get("export_type", "")) == "ANIMATION_LIB"
+
+
+static func is_level_gltf(gltf_path: String) -> bool:
+	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
+		return false
+	var meta := NexusUtils.get_nexus_metadata(gltf_path)
+	if meta.is_empty():
+		return false
+	return str(meta.get("export_type", "")) == "LEVEL"
+
+
 static func is_deferred_wave_gltf(gltf_path: String) -> bool:
 	if is_composition_gltf(gltf_path):
+		return true
+	if is_animation_lib_gltf(gltf_path):
 		return true
 	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
 		return false
@@ -643,10 +663,10 @@ static func split_gltf_paths_for_phased_reimport(gltf_paths: Array) -> Dictionar
 		var gltf_path := str(path)
 		if gltf_path.is_empty():
 			continue
-		if is_composition_gltf(gltf_path):
-			deferred_composition.append(gltf_path)
-		elif is_multimesh_manifest(gltf_path):
+		if is_multimesh_manifest(gltf_path):
 			deferred_multimesh.append(gltf_path)
+		elif is_composition_gltf(gltf_path) or is_animation_lib_gltf(gltf_path):
+			deferred_composition.append(gltf_path)
 		elif is_deferred_wave_gltf(gltf_path):
 			deferred_composition.append(gltf_path)
 		else:
@@ -657,6 +677,35 @@ static func split_gltf_paths_for_phased_reimport(gltf_paths: Array) -> Dictionar
 		"deferred_composition": deferred_composition,
 		"deferred_multimesh": deferred_multimesh,
 	}
+
+
+static func gltf_should_defer_within_priority(gltf_path: String) -> bool:
+	## True when a composition still has unresolved instance targets - sort last
+	## within the same export-type priority group.
+	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
+		return false
+	if not is_composition_gltf(gltf_path):
+		return false
+	return not composition_dependencies_ready(gltf_path)
+
+
+static func sort_gltf_paths_with_placeholder_defer(paths: Array) -> Array[String]:
+	var sorted: Array[String] = []
+	for path in paths:
+		if path is String and not path.is_empty():
+			sorted.append(path)
+	sorted.sort_custom(func(a: String, b: String) -> bool:
+		var pri_a := NexusExportOrder.export_type_priority_for_gltf(a)
+		var pri_b := NexusExportOrder.export_type_priority_for_gltf(b)
+		if pri_a != pri_b:
+			return pri_a < pri_b
+		var defer_a := 1 if gltf_should_defer_within_priority(a) else 0
+		var defer_b := 1 if gltf_should_defer_within_priority(b) else 0
+		if defer_a != defer_b:
+			return defer_a < defer_b
+		return a < b
+	)
+	return sorted
 
 
 static func gltf_needs_reimport(gltf_path: String) -> bool:
@@ -875,6 +924,9 @@ static func multimesh_sources_ready(gltf_path: String) -> Dictionary:
 			missing.append(source_name)
 			continue
 		if not _source_scene_has_mesh_instances(source_scene_path):
+			missing.append(source_name)
+			continue
+		if not _source_scene_materials_ready(source_scene_path, base_gltf_path):
 			missing.append(source_name)
 
 	if not missing.is_empty():
@@ -1171,6 +1223,65 @@ static func _source_scene_has_mesh_instances(source_scene_path: String) -> bool:
 	var found := _find_mesh_instance_with_mesh_recursive(inst) != null
 	inst.free()
 	return found
+
+
+static func _source_scene_materials_ready(
+	source_scene_path: String, source_gltf_path: String = ""
+) -> bool:
+	## True when surfaces have materials; Nexus pipeline requires external .tres (swap done).
+	var inst: Node = _instantiate_packed_scene(source_scene_path)
+	if inst == null:
+		return false
+	var mesh_nodes: Array[MeshInstance3D] = []
+	_collect_mesh_instances_for_probe(inst, mesh_nodes)
+	if mesh_nodes.is_empty():
+		inst.free()
+		return false
+	var meta_path := source_gltf_path if not source_gltf_path.is_empty() else source_scene_path
+	var scene_meta := NexusUtils.get_nexus_metadata(meta_path)
+	var require_external_tres := NexusUtils.should_swap_nexus_materials(scene_meta)
+	for mi in mesh_nodes:
+		if not _mesh_instance_materials_ready(mi, require_external_tres):
+			inst.free()
+			return false
+	inst.free()
+	return true
+
+
+static func _mesh_instance_materials_ready(mi: MeshInstance3D, require_external_tres: bool) -> bool:
+	if mi == null or mi.mesh == null:
+		return false
+	var surface_count := mi.mesh.get_surface_count()
+	if surface_count <= 0:
+		return false
+	for i in surface_count:
+		var mat: Material = mi.get_active_material(i)
+		if mat == null:
+			mat = mi.mesh.surface_get_material(i)
+		if mat == null:
+			return false
+		var needs_tres := require_external_tres or _material_has_nexus_id(mat)
+		if needs_tres and not _material_has_external_tres(mat):
+			return false
+	return true
+
+
+static func _material_has_nexus_id(mat: Material) -> bool:
+	if mat == null or not mat.has_meta("extras"):
+		return false
+	var extras = mat.get_meta("extras")
+	if not extras is Dictionary:
+		return false
+	return not str(extras.get("nexus_material_id", "")).strip_edges().is_empty()
+
+
+static func _material_has_external_tres(mat: Material) -> bool:
+	if mat == null:
+		return false
+	var path := str(mat.resource_path).strip_edges()
+	if path.is_empty() or path.get_extension().to_lower() != "tres":
+		return false
+	return ResourceLoader.exists(path) or FileAccess.file_exists(path)
 
 
 static func _find_mesh_instance_with_mesh_recursive(node: Node) -> MeshInstance3D:

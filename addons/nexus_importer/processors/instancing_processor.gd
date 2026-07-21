@@ -9,9 +9,6 @@ const INSTANCES_RESOLVED_META := "_nexus_instances_resolved"
 const MAX_INSTANCING_ATTEMPTS_PER_IMPORT := 2048
 const MAX_PENDING_INSTANCES := 4096
 
-const NexusImportContext = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
-const NexusTransformSanitize = preload("res://addons/nexus_importer/scripts/nexus_transform_sanitize.gd")
-
 var _asset_index_cache: Dictionary = {}
 var _asset_index_mtime: int = -1
 var _warned_missing_paths: Dictionary = {}
@@ -21,14 +18,12 @@ var _budget_warning_emitted: bool = false
 var _pending_cap_warning_emitted: bool = false
 var _degenerate_transform_warning_emitted: bool = false
 
-
 func reset_import_budget() -> void:
 	_instancing_attempts_this_import = 0
 	_import_budget_exhausted = false
 	_budget_warning_emitted = false
 	_pending_cap_warning_emitted = false
 	_degenerate_transform_warning_emitted = false
-
 
 func _consume_instancing_budget(gltf_context: String) -> bool:
 	if _import_budget_exhausted:
@@ -44,7 +39,6 @@ func _consume_instancing_budget(gltf_context: String) -> bool:
 			% gltf_context
 		)
 	return false
-
 
 func process(node: Node, meta: Dictionary, root: Node) -> bool:
 	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
@@ -94,7 +88,6 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 
 	return _instantiate_scene(node, root, scene_path, gltf_context, meta)
 
-
 func _instantiate_scene(
 	node: Node,
 	root: Node,
@@ -132,7 +125,6 @@ func _instantiate_scene(
 	print_verbose("Nexus Instancer: Replaced '%s' with instance of '%s'." % [instance.name, scene_path.get_file()])
 	return true
 
-
 func _sanitize_instance_transform(transform: Transform3D, gltf_context: String) -> Transform3D:
 	var safe := NexusTransformSanitize.sanitize(transform, "instance marker")
 	if safe == transform:
@@ -144,7 +136,6 @@ func _sanitize_instance_transform(transform: Transform3D, gltf_context: String) 
 			% gltf_context
 		)
 	return safe
-
 
 func _mark_pending_instance(
 	root: Node,
@@ -195,7 +186,6 @@ func _mark_pending_instance(
 		% [requested_path, asset_ref, gltf_context]
 	)
 
-
 func _load_asset_index() -> Dictionary:
 	var asset_index_path = NexusPaths.asset_index_path()
 	if not FileAccess.file_exists(asset_index_path):
@@ -217,7 +207,6 @@ func _load_asset_index() -> Dictionary:
 	_asset_index_mtime = mtime
 	return _asset_index_cache
 
-
 func _resolve_scene_path_from_asset_id(asset_id: String, root: Node, gltf_context: String) -> String:
 	var asset_index = _load_asset_index()
 	if not asset_index.has(asset_id):
@@ -236,7 +225,6 @@ func _resolve_scene_path_from_asset_id(asset_id: String, root: Node, gltf_contex
 		return ""
 
 	return base_gltf_path
-
 
 func retry_pending_instances(root: Node) -> int:
 	if NexusImportContext.should_defer_external_scene_loads():
@@ -310,7 +298,6 @@ func retry_pending_instances(root: Node) -> int:
 		root.set_meta(PENDING_INSTANCES_META, still_pending)
 	return resolved
 
-
 func _resolve_pending_node(root: Node, entry: Dictionary) -> Node:
 	var node_path := str(entry.get("node_path", ""))
 	if not node_path.is_empty():
@@ -327,7 +314,6 @@ func _resolve_pending_node(root: Node, entry: Dictionary) -> Node:
 		return null
 	return _find_placeholder_by_name(root, node_name, uuid)
 
-
 func _find_node_by_uuid(root: Node, uuid: String) -> Node:
 	var stack: Array[Node] = [root]
 	while not stack.is_empty():
@@ -341,7 +327,6 @@ func _find_node_by_uuid(root: Node, uuid: String) -> Node:
 		for child in node.get_children():
 			stack.append(child)
 	return null
-
 
 func _find_placeholder_by_name(root: Node, node_name: String, uuid: String) -> Node:
 	var matches: Array[Node] = []
@@ -364,7 +349,6 @@ func _find_placeholder_by_name(root: Node, node_name: String, uuid: String) -> N
 				if node_meta is Dictionary and str(node_meta.get("uuid", "")) == uuid:
 					return candidate
 	return matches[0]
-
 
 static func has_unresolved_placeholders(root: Node) -> bool:
 	if root == null:

@@ -2,6 +2,23 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
+## [2.0.1] - 2026-07-21
+
+### Blender Addon (nexus_b2g)
+
+- Nested **Levels** export inline again (like nested Assets).
+- sticky **asset_id** no longer leak into exports.
+- Large Levels are no longer blocked by a thin node-count budget alone.
+- SMART batch no longer skips files that still need export (empty `assets` / missing glTFs).
+- Safer index writes when Godot is open; clearer batch log after interactive export.
+- **Discard Mesh** toggles additional Viewport Display (Wire / Textured).
+
+### Godot Addon (nexus_importer)
+
+- Levels/Combined no longer loop-rebuild unresolved inherited scenes.
+- MultiMesh keeps source materials/textures more reliably after batch import.
+- Import order: Assets/Skeletals → Combined → Anim Lib → MultiMesh → Level.
+
 ## [2.0.0] - 2026-07-18
 
 ### Blender Addon (nexus_b2g)

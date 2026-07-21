@@ -4,8 +4,6 @@ extends Object
 ## Creates CollisionShape3D from nexus_collision_dims or nexus_mesh_collision_shape.
 
 const RootProcessor = preload("res://addons/nexus_importer/processors/root_processor.gd")
-const NexusTransformSanitize = preload("res://addons/nexus_importer/scripts/nexus_transform_sanitize.gd")
-
 const COLLISION_SHAPES_DIR := "collisionshapes"
 
 var _root_processor = RootProcessor.new()
@@ -55,7 +53,6 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	col_shape_node.owner = root
 	return false
 
-
 func _resolve_collision_parent(
 	parent: Node,
 	node: Node,
@@ -78,7 +75,6 @@ func _resolve_collision_parent(
 
 	return parent
 
-
 func _wrap_collision_in_hitzone(
 	parent: Node,
 	node: Node,
@@ -93,7 +89,6 @@ func _wrap_collision_in_hitzone(
 	area.owner = root
 	_root_processor.set_collision_layers(area, scene_meta, stats)
 	return area
-
 
 func _build_collision_shape_node(
 	node: Node,
@@ -128,7 +123,6 @@ func _build_collision_shape_node(
 		col_shape_node.transform = safe_node_transform * offset_transform
 	return col_shape_node
 
-
 func _apply_collision_meta(
 	col_shape_node: CollisionShape3D,
 	scene_meta: Dictionary,
@@ -150,7 +144,6 @@ func _apply_collision_meta(
 	for key in final_meta:
 		col_shape_node.set_meta(key, final_meta[key])
 
-
 func _should_replace_source_node(node: Node, node_meta: Dictionary, col_data: Dictionary) -> bool:
 	var col_shape = col_data.get("shape", "")
 	var discard_mesh = node_meta.get("discard_mesh", false)
@@ -158,14 +151,12 @@ func _should_replace_source_node(node: Node, node_meta: Dictionary, col_data: Di
 		return true
 	return col_shape == "WORLDBOUNDARY" or not node is MeshInstance3D
 
-
 func _create_shape_resource(node: Node, meta: Dictionary, offset: Vector3) -> Shape3D:
 	if meta.has("nexus_collision_dims") and not meta.has("nexus_mesh_collision_shape"):
 		return _create_primitive_shape(meta["nexus_collision_dims"])
 	if meta.has("nexus_mesh_collision_shape") and node is MeshInstance3D:
 		return _create_mesh_shape(node.mesh, meta["nexus_mesh_collision_shape"], offset)
 	return null
-
 
 func _create_primitive_shape(col_data: Dictionary) -> Shape3D:
 	match col_data.get("shape"):
@@ -197,7 +188,6 @@ func _create_primitive_shape(col_data: Dictionary) -> Shape3D:
 			return shape
 	return null
 
-
 func _externalize_separation_ray_shape(shape: Shape3D, root: Node, node_name: String) -> Shape3D:
 	if not shape is SeparationRayShape3D:
 		return shape
@@ -222,7 +212,6 @@ func _externalize_separation_ray_shape(shape: Shape3D, root: Node, node_name: St
 	var loaded := ResourceLoader.load(shape_path) as Shape3D
 	return loaded if loaded else shape
 
-
 func _create_mesh_shape(mesh: Mesh, shape_type: String, offset: Vector3) -> Shape3D:
 	if not mesh:
 		return null
@@ -243,7 +232,6 @@ func _create_mesh_shape(mesh: Mesh, shape_type: String, offset: Vector3) -> Shap
 			trimesh.set_faces(f)
 		return trimesh
 	return null
-
 
 # World transform from the local chain so it works on nodes that are not yet
 # added to the SceneTree (Godot 4.7 returns IDENTITY for off-tree global_transform).

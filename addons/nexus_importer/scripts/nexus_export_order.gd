@@ -2,19 +2,20 @@ class_name NexusExportOrder
 extends RefCounted
 
 ## Export-type priority for Godot reimport and wrapper creation (mirrors Blender export order).
+## ASSET/SKELETAL -> COMBINED -> ANIMATION_LIB -> MULTIMESH -> LEVEL
 
 const PRIORITY_ASSET := 0
-const PRIORITY_ANIMATION_LIB := 1
-const PRIORITY_MULTIMESH := 2
-const PRIORITY_COMBINED := 3
+const PRIORITY_COMBINED := 1
+const PRIORITY_ANIMATION_LIB := 2
+const PRIORITY_MULTIMESH := 3
 const PRIORITY_LEVEL := 4
 const PRIORITY_OTHER := 99
 
 const GLTF_PRIORITY_SEQUENCE: Array[int] = [
 	PRIORITY_ASSET,
+	PRIORITY_COMBINED,
 	PRIORITY_ANIMATION_LIB,
 	PRIORITY_MULTIMESH,
-	PRIORITY_COMBINED,
 	PRIORITY_LEVEL,
 	PRIORITY_OTHER,
 ]
@@ -30,12 +31,12 @@ static func export_type_priority_for_gltf(gltf_path: String) -> int:
 	match export_type:
 		"ASSET", "SKELETAL_ASSET":
 			return PRIORITY_ASSET
+		"COMBINED_ASSET":
+			return PRIORITY_COMBINED
 		"ANIMATION_LIB":
 			return PRIORITY_ANIMATION_LIB
 		"MULTIMESH", "MULTIMESH_MANIFEST":
 			return PRIORITY_MULTIMESH
-		"COMBINED_ASSET":
-			return PRIORITY_COMBINED
 		"LEVEL":
 			return PRIORITY_LEVEL
 	if str(meta.get("root_type", "")) == "NAVMESH":

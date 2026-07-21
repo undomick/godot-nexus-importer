@@ -8,8 +8,6 @@ const NEXUS_NODE_META = "NEXUS_NODE_METADATA"
 const LOD_PROCESS_EXPORT_TYPES := ["ASSET", "SKELETAL_ASSET", "COMBINED_ASSET", "LEVEL"]
 
 const AnimationProcessor = preload("res://addons/nexus_importer/processors/animation_processor.gd")
-const NexusBatchLock = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
-const NexusImportContext = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
 const BoneAttachmentProcessor = preload("res://addons/nexus_importer/processors/bone_attachment_processor.gd")
 const CollisionProcessor = preload("res://addons/nexus_importer/processors/collision_processor.gd")
 const ResonanceProcessor = preload("res://addons/nexus_importer/processors/resonance_processor.gd")
@@ -26,9 +24,6 @@ const UvLayerProcessor = preload("res://addons/nexus_importer/processors/uv_laye
 const CameraProcessor = preload("res://addons/nexus_importer/processors/camera_processor.gd")
 const PathProcessor = preload("res://addons/nexus_importer/processors/path_processor.gd")
 const NestedCollectionProcessor = preload("res://addons/nexus_importer/processors/nested_collection_processor.gd")
-const NexusMeshSanitize = preload("res://addons/nexus_importer/scripts/nexus_mesh_sanitize.gd")
-const NexusTransformSanitize = preload("res://addons/nexus_importer/scripts/nexus_transform_sanitize.gd")
-
 var animation_processor = AnimationProcessor.new()
 var bone_attachment_processor = BoneAttachmentProcessor.new()
 var collision_processor = CollisionProcessor.new()
@@ -62,7 +57,6 @@ var stats: Dictionary = {
 	"surface": ""
 }
 
-
 func _post_import(scene: Node) -> Object:
 	_reset_stats()
 
@@ -90,7 +84,6 @@ func _post_import(scene: Node) -> Object:
 
 	return scene
 
-
 func _reset_stats() -> void:
 	stats = {
 		"paths": 0,
@@ -105,7 +98,6 @@ func _reset_stats() -> void:
 		"physics": "",
 		"surface": ""
 	}
-
 
 func _route_by_export_type(
 	scene: Node,
@@ -128,7 +120,6 @@ func _route_by_export_type(
 		return composite
 
 	return null
-
 
 func _process_scene_tree(
 	scene: Node,
@@ -174,7 +165,6 @@ func _process_scene_tree(
 			if not InstancingProcessor.has_unresolved_placeholders(scene):
 				scene.set_meta(InstancingProcessor.INSTANCES_RESOLVED_META, true)
 
-
 func _extract_animations_if_needed(
 	scene: Node,
 	gltf_path: String,
@@ -191,11 +181,9 @@ func _extract_animations_if_needed(
 	if anim_stats.extracted > 0 and not anim_stats.path.is_empty():
 		scene.set_meta("nexus_anim_lib_path", anim_stats.path)
 
-
 func _log_import_summary(name: String, export_type: String, root_type: String, meta: Dictionary) -> void:
 	var gltf_path: String = str(meta.get("_summary_gltf_path", ""))
 	_print_compact_summary(name, export_type, root_type, meta, gltf_path)
-
 
 func _remove_legacy_lod_deferred_nodes(root: Node) -> void:
 	var stack: Array = [root]
@@ -209,12 +197,10 @@ func _remove_legacy_lod_deferred_nodes(root: Node) -> void:
 			else:
 				stack.append(child)
 
-
 func _collect_nodes_under_instance(root: Node) -> Dictionary:
 	var result: Dictionary = {}
 	_collect_under_instance_visit(root, false, result)
 	return result
-
 
 func _collect_under_instance_visit(n: Node, ancestor_has_asset_id: bool, result: Dictionary) -> void:
 	var extras = n.get_meta("extras", {})
@@ -225,7 +211,6 @@ func _collect_under_instance_visit(n: Node, ancestor_has_asset_id: bool, result:
 		result[n.get_instance_id()] = true
 	for child in n.get_children():
 		_collect_under_instance_visit(child, now_inside, result)
-
 
 func _process_node_recursively(
 	node: Node,
@@ -272,14 +257,12 @@ func _process_node_recursively(
 		uv_layer_processor.process(node, node_meta)
 		node_processor.process(node, node_meta, scene_meta)
 
-
 func _process_materials_recursively(node: Node, nodes_under_instance: Dictionary) -> void:
 	if nodes_under_instance.has(node.get_instance_id()):
 		return
 	material_processor.process(node, stats)
 	for child in node.get_children():
 		_process_materials_recursively(child, nodes_under_instance)
-
 
 func _externalize_gltf_materials_recursively(
 	node: Node,
@@ -288,7 +271,6 @@ func _externalize_gltf_materials_recursively(
 ) -> void:
 	material_processor.begin_externalize_pass()
 	_externalize_gltf_materials_walk(node, gltf_path, nodes_under_instance)
-
 
 func _externalize_gltf_materials_walk(
 	node: Node,
@@ -301,11 +283,9 @@ func _externalize_gltf_materials_walk(
 	for child in node.get_children():
 		_externalize_gltf_materials_walk(child, gltf_path, nodes_under_instance)
 
-
 func _should_swap_nexus_materials(scene_meta: Dictionary) -> bool:
 	# Typical GLB embeds real materials; keep them instead of swapping to .tres.
 	return NexusUtils.should_swap_nexus_materials(scene_meta)
-
 
 func _apply_animation_settings(scene: Node, meta: Dictionary) -> void:
 	var anim_player = NexusSceneUtils.find_animation_player(scene)
@@ -354,7 +334,6 @@ func _apply_animation_settings(scene: Node, meta: Dictionary) -> void:
 		if root_motion_data.has(manifest_key):
 			anim.set_meta("nexus_root_motion", true)
 
-
 func _print_compact_summary(
 	name: String,
 	type: String,
@@ -401,12 +380,10 @@ func _print_compact_summary(
 			% [name, root, stat_str, detail_str]
 		)
 
-
 func _empty_stats_label(export_type: String, gltf_path: String) -> String:
 	if export_type == "SKELETAL_ASSET" and _gltf_has_skins_without_meshes(gltf_path):
 		return "Skeleton only"
 	return "No Geometry"
-
 
 func _gltf_has_skins_without_meshes(gltf_path: String) -> bool:
 	if gltf_path.is_empty() or not NexusUtils.is_gltf_container_path(gltf_path):
@@ -425,7 +402,6 @@ func _gltf_has_skins_without_meshes(gltf_path: String) -> bool:
 		return false
 	var meshes = gltf.get("meshes", [])
 	return not meshes is Array or meshes.is_empty()
-
 
 func _print_anim_lib_summary(name: String, anim_stats: Dictionary) -> void:
 	var extracted = anim_stats.get("extracted", 0)

@@ -3,8 +3,6 @@ extends EditorScenePostImportPlugin
 
 ## Adds godot_groups to the scene root during import (stored in .scn/.glb).
 
-const NexusBatchLock = preload("res://addons/nexus_importer/scripts/nexus_batch_lock.gd")
-
 func _get_import_options(path: String):
 	add_import_option("internal_nexus_path", path)
 

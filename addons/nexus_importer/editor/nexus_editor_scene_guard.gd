@@ -2,16 +2,9 @@ class_name NexusEditorSceneGuard
 extends RefCounted
 
 ## Closes open glTF, wrapper, and inherited editor tabs before reimport.
-##
-## No persistent guard scene is used. When the active tab must be closed and no
-## other non-blocking tab is available as a keeper, the editor falls back to its
-## neutral empty state (null edited root, empty open scenes) after close_scene().
-## That neutral state is a safe resting point; a fresh scene can be opened from it.
+## Falls back to Godot's empty edited-root state when no keeper tab remains.
 
 const SCENE_SWITCH_SETTLE_FRAMES := 2
-
-const NexusPaths = preload("res://addons/nexus_importer/scripts/nexus_paths.gd")
-const NexusUtils = preload("res://addons/nexus_importer/nexus_utils.gd")
 
 
 static func related_paths_for_gltf(gltf_path: String) -> PackedStringArray:
@@ -30,23 +23,6 @@ static func related_paths_for_gltf(gltf_path: String) -> PackedStringArray:
 	result.append(res_path)
 	result.append(NexusPaths.wrapper_path_for(res_path))
 	result.append(NexusPaths.inherited_path_for(res_path))
-	return result
-
-
-static func reimport_tab_paths_for_gltf(gltf_path: String) -> PackedStringArray:
-	var result := PackedStringArray()
-	if gltf_path.is_empty():
-		return result
-
-	var canonical: String = gltf_path.replace("\\", "/").strip_edges()
-	if canonical.is_empty():
-		return result
-
-	var res_path: String = NexusUtils.to_res_gltf_path(canonical)
-	if res_path.is_empty():
-		res_path = canonical
-
-	result.append(res_path)
 	return result
 
 
@@ -162,6 +138,7 @@ static func stabilize_editor_after_close(editor_interface: EditorInterface) -> v
 	if editor_interface == null:
 		return
 
+	NexusEditorViewportGuard.push_pause(editor_interface)
 	var attempts := 0
 	while attempts < 8:
 		attempts += 1
@@ -194,6 +171,7 @@ static func stabilize_editor_after_close(editor_interface: EditorInterface) -> v
 			editor_interface.open_scene_from_path(keeper, false)
 			break
 		break
+	NexusEditorViewportGuard.pop_pause(editor_interface)
 
 
 static func close_open_nexus_asset_tabs_if_any(editor_interface: EditorInterface) -> Dictionary:
@@ -201,10 +179,6 @@ static func close_open_nexus_asset_tabs_if_any(editor_interface: EditorInterface
 	if gltf_paths.is_empty():
 		return {"closed": PackedStringArray()}
 	return close_open_scenes_for_reimport(editor_interface, gltf_paths)
-
-
-static func close_open_gltf_tabs_if_any(editor_interface: EditorInterface) -> Dictionary:
-	return close_open_nexus_asset_tabs_if_any(editor_interface)
 
 
 static func close_open_scenes_for_reimport(
@@ -224,6 +198,8 @@ static func close_open_scenes_for_reimport(
 
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors}
+
+	NexusEditorViewportGuard.push_pause(editor_interface)
 
 	var edited_root = editor_interface.get_edited_scene_root()
 	var edited_path := ""
@@ -253,6 +229,7 @@ static func close_open_scenes_for_reimport(
 			closed.append(scene_path)
 
 	stabilize_editor_after_close(editor_interface)
+	NexusEditorViewportGuard.pop_pause(editor_interface)
 
 	return {"closed": closed, "close_errors": close_errors}
 
@@ -283,6 +260,8 @@ static func close_open_scenes_for_reimport_async(
 
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors}
+
+	NexusEditorViewportGuard.push_pause(editor_interface)
 
 	var edited_root = editor_interface.get_edited_scene_root()
 	var edited_path := ""
@@ -316,5 +295,6 @@ static func close_open_scenes_for_reimport_async(
 
 	stabilize_editor_after_close(editor_interface)
 	await _settle_scene_tree(scene_tree)
+	NexusEditorViewportGuard.pop_pause(editor_interface)
 
 	return {"closed": closed, "close_errors": close_errors}

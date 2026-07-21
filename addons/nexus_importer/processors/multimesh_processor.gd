@@ -6,17 +6,10 @@ extends Object
 ## Manifest schema (v2): scene_meta.sources[] with source_asset_id, source_name, transforms, colors.
 ## Legacy v1: top-level source_asset_id + transforms (normalized to a single sources[] entry).
 
-const NexusImportContext = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
-const NexusLightSanitize = preload("res://addons/nexus_importer/scripts/nexus_light_sanitize.gd")
-const NexusVisibilityRange = preload("res://addons/nexus_importer/scripts/nexus_visibility_range.gd")
-const NexusMeshSanitize = preload("res://addons/nexus_importer/scripts/nexus_mesh_sanitize.gd")
-
 var _lod_regex: RegEx = RegEx.new()
-
 
 func _init():
 	_lod_regex.compile("^(.*)_LOD(\\d+)$")
-
 
 func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 	print_verbose("Nexus Processor: Processing as MultiMesh Manifest...")
@@ -88,7 +81,6 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 	)
 	return composite_root
 
-
 func _read_manifest(scene_meta: Dictionary) -> Dictionary:
 	var generate_collisions: bool = scene_meta.get("generate_collisions", false)
 	var asset_name: String = str(scene_meta.get("asset_name", ""))
@@ -134,7 +126,6 @@ func _read_manifest(scene_meta: Dictionary) -> Dictionary:
 		"generate_collisions": generate_collisions,
 		"asset_name": asset_name,
 	}
-
 
 func _build_source_multimesh_tree(
 	gltf_path: String,
@@ -232,7 +223,6 @@ func _build_source_multimesh_tree(
 		"layer_count": layers.size(),
 	}
 
-
 func _load_asset_index_entry(source_asset_id: String) -> Dictionary:
 	var asset_index := NexusUtils.load_index_json(
 		NexusPaths.asset_index_path(),
@@ -257,7 +247,6 @@ func _load_asset_index_entry(source_asset_id: String) -> Dictionary:
 		return {}
 	return entry
 
-
 func _resolve_source_scene_path(entry: Dictionary, source_asset_id: String) -> String:
 	var rel_path = entry.get("relative_path", "")
 	var base_gltf_path = NexusUtils.validate_index_path(rel_path)
@@ -270,16 +259,17 @@ func _resolve_source_scene_path(entry: Dictionary, source_asset_id: String) -> S
 		push_error("Nexus MultiMesh: Source file not found for ID %s." % source_asset_id)
 	return resolved
 
-
 func _collect_lod_layers(source_scene_path: String) -> Dictionary:
 	if not ResourceLoader.exists(source_scene_path):
 		return {"layers": [], "error": "Source Load Failed"}
 
-	var packed_scene = load(source_scene_path)
-	if not packed_scene:
+	var packed_scene: Resource = ResourceLoader.load(
+		source_scene_path, "", ResourceLoader.CACHE_MODE_IGNORE
+	)
+	if not packed_scene is PackedScene:
 		return {"layers": [], "error": "Source Load Failed"}
 
-	var temp_instance = packed_scene.instantiate()
+	var temp_instance = (packed_scene as PackedScene).instantiate()
 	var mesh_nodes: Array[MeshInstance3D] = []
 	_collect_mesh_instances_recursive(temp_instance, mesh_nodes)
 	if mesh_nodes.is_empty():
@@ -288,10 +278,16 @@ func _collect_lod_layers(source_scene_path: String) -> Dictionary:
 
 	for mesh_node in mesh_nodes:
 		if mesh_node.mesh:
-			mesh_node.mesh = NexusMeshSanitize.sanitize_mesh(
+			var clean_mesh := NexusMeshSanitize.sanitize_mesh(
 				mesh_node.mesh,
 				source_scene_path.get_file()
 			)
+			if clean_mesh == null:
+				continue
+			# Bake instance overrides onto a mesh copy for MultiMesh (MMI has no per-surface overrides).
+			var bake_mesh: Mesh = clean_mesh.duplicate(true)
+			_apply_active_materials_to_mesh(mesh_node, bake_mesh)
+			mesh_node.mesh = bake_mesh
 
 	var anchor := _find_lod0_anchor(mesh_nodes)
 	if anchor == null:
@@ -325,12 +321,21 @@ func _collect_lod_layers(source_scene_path: String) -> Dictionary:
 	return {"layers": layers, "temp_instance": temp_instance}
 
 
+func _apply_active_materials_to_mesh(mi: MeshInstance3D, mesh: Mesh) -> void:
+	if mi == null or mesh == null:
+		return
+	for i in mesh.get_surface_count():
+		var mat: Material = mi.get_active_material(i)
+		if mat == null:
+			mat = mesh.surface_get_material(i)
+		if mat != null:
+			mesh.surface_set_material(i, mat)
+
 func _collect_mesh_instances_recursive(node: Node, mesh_nodes: Array[MeshInstance3D]) -> void:
 	if node is MeshInstance3D and node.mesh:
 		mesh_nodes.append(node)
 	for child in node.get_children():
 		_collect_mesh_instances_recursive(child, mesh_nodes)
-
 
 func _find_lod0_anchor(mesh_nodes: Array[MeshInstance3D]) -> MeshInstance3D:
 	for mesh_node in mesh_nodes:
@@ -339,14 +344,12 @@ func _find_lod0_anchor(mesh_nodes: Array[MeshInstance3D]) -> MeshInstance3D:
 			return mesh_node
 	return mesh_nodes[0]
 
-
 func _compare_lod_layers(a: Dictionary, b: Dictionary) -> bool:
 	if a.get("is_shadow", false) != b.get("is_shadow", false):
 		return not a.get("is_shadow", false)
 	if a.get("lod_level", 0) != b.get("lod_level", 0):
 		return a.get("lod_level", 0) < b.get("lod_level", 0)
 	return false
-
 
 func _classify_lod_mesh_node(node: MeshInstance3D) -> Dictionary:
 	var node_name := node.name
@@ -386,7 +389,6 @@ func _classify_lod_mesh_node(node: MeshInstance3D) -> Dictionary:
 		"resource_suffix": resource_suffix,
 	}
 
-
 func _get_nexus_node_meta(node: Node) -> Dictionary:
 	if node.has_meta("extras"):
 		var extras = node.get_meta("extras")
@@ -394,14 +396,12 @@ func _get_nexus_node_meta(node: Node) -> Dictionary:
 			return extras["NEXUS_NODE_METADATA"]
 	return {}
 
-
 func _apply_visibility_range_from_source(target: GeometryInstance3D, range_data: Dictionary) -> void:
 	if target is MultiMeshInstance3D:
 		var mmi := target as MultiMeshInstance3D
 		if mmi.multimesh == null or mmi.multimesh.mesh == null:
 			return
 	NexusVisibilityRange.apply_multimesh_lod_from_dict(target, range_data)
-
 
 func _build_multimesh_resource(
 	gltf_path: String,
@@ -465,7 +465,6 @@ func _build_multimesh_resource(
 
 	return {"path": res_path, "resource": embedded}
 
-
 func _manifest_transform_to_transform3d(t_data: Variant, index: int) -> Variant:
 	if not t_data is Dictionary:
 		push_warning("Nexus MultiMesh: Transform entry %d is not a dictionary - skipped." % index)
@@ -502,7 +501,6 @@ func _manifest_transform_to_transform3d(t_data: Variant, index: int) -> Variant:
 		return null
 	return Transform3D(basis, loc)
 
-
 func _create_multimesh_instance(
 	source_name: String,
 	multimesh_res: MultiMesh,
@@ -515,7 +513,6 @@ func _create_multimesh_instance(
 	if not res_path.is_empty():
 		mmi_node.set_meta("nexus_multimesh_res_path", res_path)
 	return mmi_node
-
 
 func _attach_collision_script(
 	mmi_node: MultiMeshInstance3D,
@@ -551,12 +548,10 @@ func _attach_collision_script(
 	mmi_node.shape_transforms = found_transforms
 	print_verbose(" -> SUCCESS: Attached runtime script with %d shapes." % found_shapes.size())
 
-
 func _free_temp_instance(layer_result: Dictionary) -> void:
 	var temp_instance = layer_result.get("temp_instance")
 	if temp_instance:
 		temp_instance.free()
-
 
 func _count_multimesh_instances_recursive(node: Node) -> int:
 	var count := 0
@@ -566,12 +561,10 @@ func _count_multimesh_instances_recursive(node: Node) -> int:
 		count += _count_multimesh_instances_recursive(child)
 	return count
 
-
 func _assign_import_owner_recursive(node: Node, owner_root: Node) -> void:
 	for child in node.get_children():
 		child.owner = owner_root
 		_assign_import_owner_recursive(child, owner_root)
-
 
 func _remove_stale_multimesh_sidecars(gltf_path: String) -> void:
 	for res_path in NexusSceneUtils.multimesh_expected_res_paths(gltf_path):
@@ -593,7 +586,6 @@ func _remove_stale_multimesh_sidecars(gltf_path: String) -> void:
 		name = dir.get_next()
 	dir.list_dir_end()
 
-
 # Stamp the Nexus identity meta on the composite (or error composite) that
 # replaces the glTF's imported scene, so the inherited-scene builder recognizes
 # it as the expected edit root (_is_expected_inherited_edit_root checks
@@ -603,7 +595,6 @@ func _stamp_nexus_meta(root: Node, gltf_path: String) -> Node:
 	root.set_meta("_nexus_gltf_path", gltf_path)
 	root.set_meta("_nexus_export_type", "MULTIMESH_MANIFEST")
 	return root
-
 
 func _create_error_node(reason: String) -> Node3D:
 	var root = Node3D.new()
