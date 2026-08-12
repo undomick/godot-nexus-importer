@@ -1,15 +1,8 @@
 @tool
 extends Object
 
-## Converts MULTIMESH_MANIFEST glTF to a composite Node3D with per-source MultiMeshInstance3D trees.
-##
 ## Manifest schema (v2): scene_meta.sources[] with source_asset_id, source_name, transforms, colors.
 ## Legacy v1: top-level source_asset_id + transforms (normalized to a single sources[] entry).
-
-var _lod_regex: RegEx = RegEx.new()
-
-func _init():
-	_lod_regex.compile("^(.*)_LOD(\\d+)$")
 
 func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 	print_verbose("Nexus Processor: Processing as MultiMesh Manifest...")
@@ -294,11 +287,11 @@ func _collect_lod_layers(source_scene_path: String) -> Dictionary:
 		temp_instance.free()
 		return {"layers": [], "error": "No Mesh in Source"}
 
-	var anchor_kind := _classify_lod_mesh_node(anchor)
+	var anchor_kind := NexusSceneUtils.classify_lod_mesh_node(anchor)
 	var base_name: String = anchor_kind["base_name"]
 	var layers: Array = []
 	for mesh_node in mesh_nodes:
-		var kind := _classify_lod_mesh_node(mesh_node)
+		var kind := NexusSceneUtils.classify_lod_mesh_node(mesh_node)
 		if kind["base_name"] != base_name:
 			continue
 		layers.append(
@@ -339,7 +332,7 @@ func _collect_mesh_instances_recursive(node: Node, mesh_nodes: Array[MeshInstanc
 
 func _find_lod0_anchor(mesh_nodes: Array[MeshInstance3D]) -> MeshInstance3D:
 	for mesh_node in mesh_nodes:
-		var kind := _classify_lod_mesh_node(mesh_node)
+		var kind := NexusSceneUtils.classify_lod_mesh_node(mesh_node)
 		if kind["lod_level"] == 0 and not kind["is_shadow"]:
 			return mesh_node
 	return mesh_nodes[0]
@@ -350,51 +343,6 @@ func _compare_lod_layers(a: Dictionary, b: Dictionary) -> bool:
 	if a.get("lod_level", 0) != b.get("lod_level", 0):
 		return a.get("lod_level", 0) < b.get("lod_level", 0)
 	return false
-
-func _classify_lod_mesh_node(node: MeshInstance3D) -> Dictionary:
-	var node_name := node.name
-	var is_shadow := false
-	var lod_level := 0
-	var node_suffix := ""
-	var resource_suffix := ""
-	var base_name := node_name
-
-	if _get_nexus_node_meta(node).get("nexus_is_shadow_proxy", false):
-		is_shadow = true
-		node_suffix = "_Shadow"
-		resource_suffix = "_shadow"
-		base_name = node_name.trim_suffix("_Shadow").trim_suffix("_LOD0")
-	elif node_name.ends_with("_Shadow"):
-		is_shadow = true
-		node_suffix = "_Shadow"
-		resource_suffix = "_shadow"
-		base_name = node_name.trim_suffix("_Shadow").trim_suffix("_LOD0")
-	else:
-		var lod_match := _lod_regex.search(node_name)
-		if lod_match:
-			base_name = lod_match.get_string(1)
-			lod_level = int(lod_match.get_string(2))
-			if lod_level > 0:
-				node_suffix = "_LOD%d" % lod_level
-				resource_suffix = "_lod%d" % lod_level
-		elif node_name.ends_with("_LOD0"):
-			base_name = node_name.trim_suffix("_LOD0")
-			lod_level = 0
-
-	return {
-		"base_name": base_name,
-		"lod_level": lod_level,
-		"is_shadow": is_shadow,
-		"node_suffix": node_suffix,
-		"resource_suffix": resource_suffix,
-	}
-
-func _get_nexus_node_meta(node: Node) -> Dictionary:
-	if node.has_meta("extras"):
-		var extras = node.get_meta("extras")
-		if extras is Dictionary and extras.has("NEXUS_NODE_METADATA"):
-			return extras["NEXUS_NODE_METADATA"]
-	return {}
 
 func _apply_visibility_range_from_source(target: GeometryInstance3D, range_data: Dictionary) -> void:
 	if target is MultiMeshInstance3D:
@@ -567,7 +515,7 @@ func _assign_import_owner_recursive(node: Node, owner_root: Node) -> void:
 		_assign_import_owner_recursive(child, owner_root)
 
 func _remove_stale_multimesh_sidecars(gltf_path: String) -> void:
-	for res_path in NexusSceneUtils.multimesh_expected_res_paths(gltf_path):
+	for res_path in NexusMultiMeshUtils.multimesh_expected_res_paths(gltf_path):
 		if FileAccess.file_exists(res_path):
 			DirAccess.remove_absolute(ProjectSettings.globalize_path(res_path))
 

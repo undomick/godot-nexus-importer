@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Converts nexus_curve metadata to Path3D with Curve3D.
-
 func process(node: Node, node_meta: Dictionary, parent: Node) -> bool:
 	if not node_meta.has("nexus_curve"):
 		return false

@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Creates ModifierBoneTarget3D and reparents the node to attach it to a skeleton bone.
-
 func process(node: Node3D, meta: Dictionary, root: Node) -> bool:
 	meta = _resolve_attachment_meta(node, meta)
 	if not meta.has("nexus_bone_attachment"):
@@ -62,10 +60,9 @@ func _resolve_attachment_meta(node: Node3D, meta: Dictionary) -> Dictionary:
 		return meta
 	if ex.has("nexus_bone_attachment"):
 		return ex
-	if ex.has("NEXUS_NODE_METADATA"):
-		var inner = ex["NEXUS_NODE_METADATA"]
-		if inner is Dictionary and inner.has("nexus_bone_attachment"):
-			return inner
+	var inner := NexusSceneUtils.nexus_meta_from_extras(ex)
+	if inner.has("nexus_bone_attachment"):
+		return inner
 	return meta
 
 
@@ -84,7 +81,7 @@ func _resolve_bone_offset(
 	var skel_world := (
 		skeleton.global_transform
 		if skeleton.is_inside_tree()
-		else _get_accumulated_transform(skeleton, root)
+		else NexusTransformSanitize.accumulated_transform(skeleton, root)
 	)
 	var empty_skel := skel_world.affine_inverse() * node_world
 	var bone_rest := skeleton.get_bone_global_rest(bone_idx)
@@ -98,7 +95,7 @@ func _get_node_world_transform(node: Node3D, root: Node, meta: Dictionary) -> Tr
 	var world_xform = _get_node_world_transform_from_gltf(gltf_path, node.name, meta, false)
 	if world_xform != null:
 		return world_xform
-	return _get_accumulated_transform(node, root)
+	return NexusTransformSanitize.accumulated_transform(node, root)
 
 
 func _ensure_bone_target(
@@ -148,7 +145,7 @@ func _get_node_world_transform_from_gltf(gltf_path: String, node_name: String, m
 		if n.get("name", "") != node_name:
 			continue
 		var extras = n.get("extras", {})
-		var node_meta = extras.get("NEXUS_NODE_METADATA", {})
+		var node_meta = NexusSceneUtils.nexus_meta_from_extras(extras)
 		if node_meta.has("nexus_bone_attachment"):
 			target_idx = i
 			break
@@ -207,24 +204,6 @@ func _get_float(arr: Array, i: int) -> float:
 	if v is int:
 		return float(v)
 	return 0.0
-
-
-func _get_accumulated_transform(node: Node, root: Node) -> Transform3D:
-	var path: Array[Node] = []
-	var n: Node = node
-	while is_instance_valid(n):
-		path.append(n)
-		if n == root:
-			break
-		n = n.get_parent()
-	if path.is_empty():
-		return Transform3D.IDENTITY
-	path.reverse()
-	var t = Transform3D.IDENTITY
-	for nd in path:
-		if nd is Node3D:
-			t = t * nd.transform
-	return t
 
 
 func _is_skeleton_child(node: Node, skeleton: Skeleton3D) -> bool:

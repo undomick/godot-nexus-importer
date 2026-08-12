@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Replaces placeholder nodes with instanced scenes from asset_index or nexus_placeholder_path.
-
 const PENDING_INSTANCES_META := "_nexus_pending_instances"
 const INSTANCES_RESOLVED_META := "_nexus_instances_resolved"
 
@@ -61,9 +59,18 @@ func process(node: Node, meta: Dictionary, root: Node) -> bool:
 			)
 			return false
 	elif meta.has("nexus_asset_id"):
-		requested_path = _resolve_scene_path_from_asset_id(meta["nexus_asset_id"], root, gltf_context)
+		var asset_id := str(meta["nexus_asset_id"])
+		requested_path = _resolve_scene_path_from_asset_id(asset_id, root, gltf_context)
 		if requested_path.is_empty():
 			return false
+		if not _marker_name_matches_asset(node.name, requested_path):
+			push_warning(
+				(
+					"Nexus Instancer: Marker '%s' resolves to '%s' (asset_id %s); "
+					+ "name mismatch - check for duplicate asset_ids in Blender.%s"
+				)
+				% [node.name, requested_path.get_file(), asset_id, gltf_context]
+			)
 
 	if requested_path.is_empty():
 		return false
@@ -226,6 +233,22 @@ func _resolve_scene_path_from_asset_id(asset_id: String, root: Node, gltf_contex
 
 	return base_gltf_path
 
+static func _marker_name_matches_asset(marker_name: String, resolved_gltf_path: String) -> bool:
+	var marker := str(marker_name).strip_edges()
+	if marker.is_empty() or resolved_gltf_path.is_empty():
+		return true
+	var asset_stem := resolved_gltf_path.get_file().get_basename()
+	if asset_stem.is_empty():
+		return true
+	var base := marker
+	while true:
+		var stripped := base.rstrip("0123456789")
+		if stripped.ends_with("_") and stripped.length() < base.length():
+			base = stripped.substr(0, stripped.length() - 1)
+			continue
+		break
+	return base == asset_stem
+
 func retry_pending_instances(root: Node) -> int:
 	if NexusImportContext.should_defer_external_scene_loads():
 		return 0
@@ -321,8 +344,8 @@ func _find_node_by_uuid(root: Node, uuid: String) -> Node:
 		if node.has_meta("extras"):
 			var extras = node.get_meta("extras")
 			if extras is Dictionary:
-				var node_meta = extras.get("NEXUS_NODE_METADATA", {})
-				if node_meta is Dictionary and str(node_meta.get("uuid", "")) == uuid:
+				var node_meta = NexusSceneUtils.nexus_meta_from_extras(extras)
+				if str(node_meta.get("uuid", "")) == uuid:
 					return node
 		for child in node.get_children():
 			stack.append(child)
@@ -345,8 +368,8 @@ func _find_placeholder_by_name(root: Node, node_name: String, uuid: String) -> N
 		if candidate.has_meta("extras"):
 			var extras = candidate.get_meta("extras")
 			if extras is Dictionary:
-				var node_meta = extras.get("NEXUS_NODE_METADATA", {})
-				if node_meta is Dictionary and str(node_meta.get("uuid", "")) == uuid:
+				var node_meta = NexusSceneUtils.nexus_meta_from_extras(extras)
+				if str(node_meta.get("uuid", "")) == uuid:
 					return candidate
 	return matches[0]
 
@@ -362,9 +385,9 @@ static func has_unresolved_placeholders(root: Node) -> bool:
 			continue
 		if node.has_meta("extras"):
 			var extras = node.get_meta("extras")
-			if extras is Dictionary and "NEXUS_NODE_METADATA" in extras:
-				var node_meta = extras["NEXUS_NODE_METADATA"]
-				if node_meta is Dictionary:
+			if extras is Dictionary and NexusSceneUtils.NEXUS_NODE_META in extras:
+				var node_meta = NexusSceneUtils.nexus_meta_from_extras(extras)
+				if not node_meta.is_empty():
 					if node_meta.has("nexus_asset_id") or node_meta.has("nexus_placeholder_path"):
 						return true
 		for child in node.get_children():

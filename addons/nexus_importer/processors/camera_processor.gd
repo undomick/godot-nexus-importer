@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Applies nexus_camera metadata to Camera3D (perspective/orthographic, focal length, DOF).
-
 const MIN_NEAR := 0.01
 const MAX_FAR := 100000.0
 const MAX_FAR_NEAR_RATIO := 100000.0

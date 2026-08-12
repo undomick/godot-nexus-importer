@@ -3,10 +3,6 @@ extends EditorScenePostImport
 
 ## Post-import processor for Nexus glTF assets. Converts nodes, materials, animations, LODs, etc.
 
-const NEXUS_ASSET_META = "NEXUS_ASSET_METADATA"
-const NEXUS_NODE_META = "NEXUS_NODE_METADATA"
-const LOD_PROCESS_EXPORT_TYPES := ["ASSET", "SKELETAL_ASSET", "COMBINED_ASSET", "LEVEL"]
-
 const AnimationProcessor = preload("res://addons/nexus_importer/processors/animation_processor.gd")
 const BoneAttachmentProcessor = preload("res://addons/nexus_importer/processors/bone_attachment_processor.gd")
 const CollisionProcessor = preload("res://addons/nexus_importer/processors/collision_processor.gd")
@@ -92,6 +88,7 @@ func _reset_stats() -> void:
 		"resonance": 0,
 		"lods": 0,
 		"instances": 0,
+		"nested": 0,
 		"lights": 0,
 		"cameras": 0,
 		"anims": 0,
@@ -116,7 +113,7 @@ func _route_by_export_type(
 		NexusImportContext.set_multimesh_post_import_active(true)
 		var composite := multimesh_processor.process(gltf_path, scene_meta)
 		NexusImportContext.set_multimesh_post_import_active(false)
-		NexusSceneUtils.invalidate_multimesh_pipeline_cache(gltf_path)
+		NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(gltf_path)
 		return composite
 
 	return null
@@ -141,7 +138,7 @@ func _process_scene_tree(
 	if swap_nexus_materials:
 		NexusSceneUtils.inject_nexus_material_extras_from_gltf(scene, gltf_path)
 	NexusSceneUtils.reroll_duplicate_uuid_markers(scene)
-	if export_type in LOD_PROCESS_EXPORT_TYPES:
+	if NexusExportOrder.is_lod_process_export_type(export_type):
 		NexusMeshSanitize.sanitize_scene_meshes(scene, gltf_path.get_file())
 	nested_collection_processor.process_scene(scene, stats)
 	var nodes_under_instance = _collect_nodes_under_instance(scene)
@@ -150,12 +147,13 @@ func _process_scene_tree(
 	_process_node_recursively(scene, scene, scene_meta, nodes_under_instance)
 	if swap_nexus_materials:
 		_process_materials_recursively(scene, nodes_under_instance)
+		material_processor.flush_index_if_dirty()
 	else:
 		_externalize_gltf_materials_recursively(scene, gltf_path, nodes_under_instance)
 
 	_extract_animations_if_needed(scene, gltf_path, scene_meta, export_type)
 
-	if export_type in LOD_PROCESS_EXPORT_TYPES:
+	if NexusExportOrder.is_lod_process_export_type(export_type):
 		lod_processor.process(scene, stats)
 		_remove_legacy_lod_deferred_nodes(scene)
 
@@ -171,7 +169,7 @@ func _extract_animations_if_needed(
 	scene_meta: Dictionary,
 	export_type: String
 ) -> void:
-	if export_type not in ["ASSET", "SKELETAL_ASSET", "COMBINED_ASSET", "LEVEL"]:
+	if not NexusExportOrder.is_lod_process_export_type(export_type):
 		return
 	var scene_style := NexusSceneUtils.preferred_scene_style_for_gltf(gltf_path)
 	var anim_stats = animation_processor.extract_and_save_animations(
@@ -203,9 +201,8 @@ func _collect_nodes_under_instance(root: Node) -> Dictionary:
 	return result
 
 func _collect_under_instance_visit(n: Node, ancestor_has_asset_id: bool, result: Dictionary) -> void:
-	var extras = n.get_meta("extras", {})
-	var node_meta = extras.get(NEXUS_NODE_META) if extras is Dictionary else {}
-	var this_has_asset_id = (node_meta is Dictionary) and not str(node_meta.get("nexus_asset_id", "")).is_empty()
+	var node_meta := NexusSceneUtils.get_node_nexus_meta(n)
+	var this_has_asset_id = not str(node_meta.get("nexus_asset_id", "")).is_empty()
 	var now_inside := ancestor_has_asset_id or this_has_asset_id
 	if ancestor_has_asset_id:
 		result[n.get_instance_id()] = true
@@ -223,9 +220,9 @@ func _process_node_recursively(
 		_process_node_recursively(child, root, scene_meta, nodes_under_instance)
 
 	var node_extras = node.get_meta("extras", {})
-	if not node_extras is Dictionary or not NEXUS_NODE_META in node_extras:
+	if not node_extras is Dictionary or not NexusSceneUtils.NEXUS_NODE_META in node_extras:
 		return
-	var node_meta = node_extras[NEXUS_NODE_META]
+	var node_meta = NexusSceneUtils.nexus_meta_from_extras(node_extras)
 
 	if node_meta.get("nexus_is_lod", false):
 		return

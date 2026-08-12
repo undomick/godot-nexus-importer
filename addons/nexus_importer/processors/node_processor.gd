@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Applies visibility, shadow casting and GI mode from node metadata.
-
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary) -> void:
 	_process_visibility(node, node_meta)
 	

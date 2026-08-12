@@ -1,16 +1,6 @@
 @tool
 extends Object
 
-## Applies LOD visibility ranges and shadow proxy linking from nexus metadata.
-
-var _lod_regex: RegEx = RegEx.new()
-
-func _init():
-	_lod_regex.compile("^(.*)_LOD\\d+$")
-
-func _is_lod_or_shadow_node(node_name: String) -> bool:
-	return _lod_regex.search(node_name) != null or node_name.ends_with("_Shadow")
-
 func process(scene_root: Node, stats: Dictionary) -> void:
 	_process_node_recursive(scene_root, stats)
 
@@ -34,7 +24,7 @@ func _apply_lod_settings(node: GeometryInstance3D, stats: Dictionary) -> void:
 			_apply_visibility_range(node, range_data)
 			stats["lods"] = int(stats.get("lods", 0)) + 1
 
-	var nexus_meta = _get_nexus_node_meta(node)
+	var nexus_meta = NexusSceneUtils.get_node_nexus_meta(node)
 	if nexus_meta.get("nexus_is_shadow_proxy", false):
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
 		node.visible = true
@@ -51,15 +41,11 @@ func _link_shadow_proxies(parent: Node) -> void:
 	for mesh in children:
 		if not mesh is GeometryInstance3D:
 			continue
-		var meta = _get_nexus_node_meta(mesh)
+		var meta = NexusSceneUtils.get_node_nexus_meta(mesh)
 		if meta.get("nexus_is_shadow_proxy", false):
 			continue
 
-		var base_name = mesh.name
-		var result = _lod_regex.search(mesh.name)
-		if result:
-			base_name = result.get_string(1)
-
+		var base_name: String = NexusSceneUtils.classify_lod_mesh_node(mesh)["base_name"]
 		if not shadow_proxies.has(base_name):
 			continue
 
@@ -76,19 +62,12 @@ func _collect_shadow_proxies(children: Array) -> Dictionary:
 	for child in children:
 		if not child is GeometryInstance3D:
 			continue
-		var meta = _get_nexus_node_meta(child)
+		var meta = NexusSceneUtils.get_node_nexus_meta(child)
 		if not meta.get("nexus_is_shadow_proxy", false):
 			continue
-		var base_name = child.name.trim_suffix("_Shadow").trim_suffix("_LOD0")
+		var base_name: String = NexusSceneUtils.classify_lod_mesh_node(child)["base_name"]
 		shadow_proxies[base_name] = child
 	return shadow_proxies
-
-func _get_nexus_node_meta(node: Node) -> Dictionary:
-	if node.has_meta("extras"):
-		var extras = node.get_meta("extras")
-		if extras is Dictionary and extras.has("NEXUS_NODE_METADATA"):
-			return extras["NEXUS_NODE_METADATA"]
-	return {}
 
 func _get_visibility_range_end(node: GeometryInstance3D) -> float:
 	return node.visibility_range_end

@@ -1,7 +1,12 @@
 class_name NexusReimportManager
 extends RefCounted
 
-## Phased reimport queues, import-config fixups, and signal-based flush logic.
+## Phased reimport queues and signal-based flush logic.
+## Inherited-scene queuing and import-config fixups live in dedicated helpers.
+
+const NexusSceneCompleteness = preload(
+	"res://addons/nexus_importer/scripts/nexus_scene_completeness.gd"
+)
 
 ## Settle frames before reimport_files: 0 when FS idle, else 1.
 const REIMPORT_DELAY_BUSY = 1
@@ -28,22 +33,32 @@ var _reimport_in_progress: bool = false
 var _batch_reimport_active: bool = false
 var _active_batch_paths: Dictionary = {}
 var _config_deferred_queue: Array[String] = []
+var _config_deferred_scheduled: bool = false
+var _flush_pending_scheduled: bool = false
+var _flush_pending_just_reimported: Array = []
+var _flush_fallback_timer_active: bool = false
 var _deferred_config_paths: Array[String] = []
 var _deferred_wrapper_paths: Array[String] = []
 var _deferred_composition_gltf_paths: Array[String] = []
 var _deferred_multimesh_paths: Array[String] = []
-var _purged_binary_import_warned: Dictionary = {}
 var _composition_wave_active: bool = false
 var _multimesh_wave_active: bool = false
 var _composition_wave_wait_log_frames: int = 0
-var _composition_scene_log_fingerprint: String = ""
 var _mass_import_wrapper_flushed: Dictionary = {}
 var _config_stabilized_paths: Dictionary = {}
 var _config_pending_reimport_paths: Dictionary = {}
 var _recently_reimported_ms: Dictionary = {}
 
+var _inherited_scenes: NexusInheritedSceneQueue
+var _config_fixer: NexusImportConfigFixer
+
 func _init(plugin: EditorPlugin) -> void:
 	_plugin = plugin
+	_inherited_scenes = NexusInheritedSceneQueue.new()
+	_config_fixer = NexusImportConfigFixer.new()
+	_config_fixer.set_reimport_queue_callback(
+		func(paths) -> void: queue_catchup_reimport([], paths)
+	)
 
 func is_reimport_active() -> bool:
 	return _reimport_pending or _reimport_in_progress or _batch_reimport_active
@@ -53,14 +68,16 @@ func was_recently_reimported(gltf_path: String) -> bool:
 		return false
 	return Time.get_ticks_msec() - int(_recently_reimported_ms[gltf_path]) < RECENTLY_REIMPORTED_GRACE_MS
 
-func note_resources_reimported(resources: PackedStringArray) -> void:
+func note_resources_reimported(
+	resources: PackedStringArray, wrapper_builder: NexusWrapperBuilder = null
+) -> void:
 	var now := Time.get_ticks_msec()
 	var asset_index := NexusUtils.load_index_json(
 		NexusPaths.asset_index_path(),
 		"asset_index.json",
 		false,
 	)
-	var gltf_to_index_entry := _index_entries_by_gltf_path(asset_index)
+	var gltf_to_index_entry := NexusImportConfigFixer.index_entries_by_gltf_path(asset_index)
 	for path in resources:
 		if not path is String:
 			continue
@@ -76,6 +93,17 @@ func note_resources_reimported(resources: PackedStringArray) -> void:
 		var index_entry: Dictionary = gltf_to_index_entry.get(canonical, {})
 		var index_hash := str(index_entry.get("content_hash", "")).strip_edges()
 		NexusImportState.mark_imported(canonical, index_hash)
+		NexusSceneCompleteness.invalidate(canonical)
+		if wrapper_builder != null:
+			# Composition abort clear stays in plugin (skips forced resolution reimports).
+			if NexusSceneUtils.is_composition_gltf(canonical):
+				wrapper_builder.reset_build_retries(canonical)
+				if canonical != path:
+					wrapper_builder.reset_build_retries(path)
+			else:
+				wrapper_builder.clear_inherited_abort(canonical)
+				if canonical != path:
+					wrapper_builder.clear_inherited_abort(path)
 
 func is_config_fix_needed(gltf_path: String) -> bool:
 	return _should_defer_config_fix(gltf_path)
@@ -191,7 +219,7 @@ func try_queue_multimesh_wave() -> bool:
 		var canonical := NexusUtils.to_res_gltf_path(path)
 		if canonical.is_empty():
 			canonical = path
-		var sources_ready := NexusSceneUtils.multimesh_sources_ready(canonical)
+		var sources_ready := NexusMultiMeshUtils.multimesh_sources_ready(canonical)
 		if sources_ready.get("ok", false):
 			ready_paths.append(canonical)
 	if ready_paths.is_empty():
@@ -222,7 +250,7 @@ func _log_deferred_multimesh_wave_blocked() -> void:
 	_composition_wave_wait_log_frames = 180
 	var waiting: PackedStringArray = []
 	for path in _deferred_multimesh_paths:
-		var sources_ready := NexusSceneUtils.multimesh_sources_ready(path)
+		var sources_ready := NexusMultiMeshUtils.multimesh_sources_ready(path)
 		if sources_ready.get("ok", false):
 			continue
 		waiting.append(path.get_file())
@@ -422,8 +450,8 @@ func flush_mass_import_post_processing(wrapper_builder: NexusWrapperBuilder) -> 
 			continue
 		if _pending_reimport_after_signal.has(path):
 			continue
-		if NexusSceneUtils.is_multimesh_manifest(path):
-			var import_ready := NexusSceneUtils.multimesh_import_ready(path)
+		if NexusMultiMeshUtils.is_multimesh_manifest(path):
+			var import_ready := NexusMultiMeshUtils.multimesh_import_ready(path)
 			if not import_ready.get("ok", false):
 				continue
 		if NexusSceneUtils.should_create_packed_scene(path):
@@ -440,292 +468,45 @@ func flush_mass_import_post_processing(wrapper_builder: NexusWrapperBuilder) -> 
 	if not _pending_reimport_after_signal.is_empty():
 		cooldown_remaining = SAFETY_FRAMES_HEAVY * 2
 		_pending_flush_ready = false
-		var timer = _plugin.get_tree().create_timer(FLUSH_FALLBACK_TIMEOUT)
-		timer.timeout.connect(_on_flush_fallback_timeout)
+		_arm_flush_fallback_timer()
+
 
 func queue_wrapper_fixup_for_paths(
 	paths: Array[String], wrapper_builder: NexusWrapperBuilder
 ) -> int:
-	if not NexusPaths.auto_import_enabled():
-		return 0
-	var queued := 0
-	for path in paths:
-		if path is String and NexusSceneUtils.should_create_packed_scene(path):
-			if wrapper_builder.needs_scene_processing(path):
-				wrapper_builder.queue_scene(path)
-				queued += 1
-	return queued
+	return _inherited_scenes.queue_wrapper_fixup_for_paths(paths, wrapper_builder)
 
 func queue_composition_inherited_scenes_from_index(wrapper_builder: NexusWrapperBuilder) -> int:
-	if not NexusPaths.auto_import_enabled():
-		return 0
-
-	var evaluation := _evaluate_composition_inherited_scene_candidates(wrapper_builder, true)
-	_log_composition_scene_queue_summary(evaluation)
-	return evaluation.ready_to_queue.size()
+	return _inherited_scenes.queue_composition_inherited_scenes_from_index(wrapper_builder)
 
 func queue_multimesh_inherited_scenes_from_paths(
 	wrapper_builder: NexusWrapperBuilder, gltf_paths: PackedStringArray
 ) -> int:
-	if not NexusPaths.auto_import_enabled():
-		return 0
-
-	var evaluation := _evaluate_multimesh_inherited_scene_candidates(
-		wrapper_builder, gltf_paths, true
-	)
-	_log_multimesh_scene_queue_summary(evaluation)
-	return evaluation.ready_to_queue.size()
+	return _inherited_scenes.queue_multimesh_inherited_scenes_from_paths(wrapper_builder, gltf_paths)
 
 func queue_multimesh_inherited_scenes_from_index(wrapper_builder: NexusWrapperBuilder) -> int:
-	var paths: PackedStringArray = []
-	for gltf_path in _multimesh_paths_from_index():
-		paths.append(gltf_path)
-	return queue_multimesh_inherited_scenes_from_paths(wrapper_builder, paths)
+	return _inherited_scenes.queue_multimesh_inherited_scenes_from_index(wrapper_builder)
 
 func has_pending_inherited_scene_work(wrapper_builder: NexusWrapperBuilder) -> bool:
-	if not NexusPaths.auto_import_enabled():
-		return false
-	var composition_eval := _evaluate_composition_inherited_scene_candidates(wrapper_builder, false)
-	if (
-		not composition_eval.ready_to_queue.is_empty()
-		or not composition_eval.waiting_on_deps.is_empty()
-	):
-		return true
-	var multimesh_eval := _evaluate_multimesh_inherited_scene_candidates(
-		wrapper_builder, PackedStringArray(), false
-	)
-	return (
-		not multimesh_eval.ready_to_queue.is_empty()
-		or not multimesh_eval.waiting_on_import.is_empty()
-	)
+	return _inherited_scenes.has_pending_inherited_scene_work(wrapper_builder)
 
 func has_pending_composition_scene_work(wrapper_builder: NexusWrapperBuilder) -> bool:
 	if has_deferred_composition_paths() or has_deferred_multimesh_paths():
 		return true
 	return has_pending_inherited_scene_work(wrapper_builder)
 
-func _composition_paths_from_index() -> Array[String]:
-	var asset_index := NexusUtils.load_index_json(
-		NexusPaths.asset_index_path(),
-		"asset_index.json",
-		false,
-	)
-	if asset_index.is_empty():
-		return []
+func fix_import_config_if_needed(gltf_path: String, do_write: bool = true) -> bool:
+	return _config_fixer.fix_import_config_if_needed(gltf_path, do_write)
 
-	var by_canonical: Dictionary = {}
-	for asset_id in asset_index.keys():
-		var entry = asset_index[asset_id]
-		var rel_path: String = entry.get("relative_path", "")
-		if rel_path.is_empty():
-			continue
-		var gltf_path := NexusUtils.validate_index_path(rel_path)
-		if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
-			continue
-		var meta := NexusUtils.get_nexus_metadata(gltf_path)
-		var export_type: String = str(meta.get("export_type", ""))
-		if export_type != "COMBINED_ASSET" and export_type != "LEVEL":
-			continue
-		by_canonical[gltf_path] = true
-
-	for path in NexusSceneUtils.discover_unindexed_composition_gltfs(asset_index):
-		var canonical := NexusUtils.to_res_gltf_path(path)
-		if canonical.is_empty():
-			continue
-		by_canonical[canonical] = true
-
-	var composition_paths: Array[String] = []
-	for key in by_canonical.keys():
-		composition_paths.append(key)
-
-	composition_paths.sort_custom(func(a: String, b: String) -> bool:
-		var meta_a := NexusUtils.get_nexus_metadata(a)
-		var meta_b := NexusUtils.get_nexus_metadata(b)
-		var pri_a := _dependent_export_type_priority(str(meta_a.get("export_type", "")))
-		var pri_b := _dependent_export_type_priority(str(meta_b.get("export_type", "")))
-		if pri_a != pri_b:
-			return pri_a < pri_b
-		return a < b
-	)
-	return composition_paths
-
-func _evaluate_composition_inherited_scene_candidates(
-	wrapper_builder: NexusWrapperBuilder,
-	do_queue: bool
-) -> Dictionary:
-	var ready_to_queue: Array[String] = []
-	var waiting_on_deps: Array[String] = []
-	var skipped_bloated: Array[String] = []
-	var skipped_up_to_date: Array[String] = []
-
-	for gltf_path in _composition_paths_from_index():
-		if not NexusSceneUtils.should_create_packed_scene(gltf_path):
-			continue
-		if not NexusSceneUtils.is_thin_composition_gltf(gltf_path):
-			skipped_bloated.append(gltf_path.get_file())
-			continue
-		if not wrapper_builder.needs_scene_processing(gltf_path):
-			skipped_up_to_date.append(gltf_path.get_file())
-			continue
-		if not NexusSceneUtils.composition_dependencies_ready(gltf_path):
-			waiting_on_deps.append(gltf_path.get_file())
-			continue
-		if wrapper_builder.is_scene_queued(gltf_path):
-			continue
-		ready_to_queue.append(gltf_path)
-		if do_queue:
-			wrapper_builder.queue_scene(gltf_path)
-
-	return {
-		"ready_to_queue": ready_to_queue,
-		"waiting_on_deps": waiting_on_deps,
-		"skipped_bloated": skipped_bloated,
-		"skipped_up_to_date": skipped_up_to_date,
-	}
-
-func _log_composition_scene_queue_summary(evaluation: Dictionary) -> void:
-	var queued_count: int = evaluation.get("ready_to_queue", []).size()
-	var bloated: Array = evaluation.get("skipped_bloated", [])
-	var waiting_deps: Array = evaluation.get("waiting_on_deps", [])
-	var up_to_date: Array = evaluation.get("skipped_up_to_date", [])
-
-	if (
-		queued_count == 0
-		and bloated.is_empty()
-		and waiting_deps.is_empty()
-		and up_to_date.is_empty()
-	):
-		return
-
-	var has_actionable := queued_count > 0 or not bloated.is_empty() or not waiting_deps.is_empty()
-	if not has_actionable and not up_to_date.is_empty():
-		var fingerprint := ", ".join(up_to_date)
-		if fingerprint == _composition_scene_log_fingerprint:
-			return
-		_composition_scene_log_fingerprint = fingerprint
-	elif has_actionable:
-		_composition_scene_log_fingerprint = ""
-
-	var parts: PackedStringArray = []
-	if queued_count > 0:
-		parts.append("queued %d" % queued_count)
-	if not bloated.is_empty():
-		parts.append("skipped_bloated: [%s]" % ", ".join(bloated))
-	if not waiting_deps.is_empty():
-		parts.append("skipped_deps: [%s]" % ", ".join(waiting_deps))
-	if not up_to_date.is_empty():
-		parts.append("skipped_up_to_date: [%s]" % ", ".join(up_to_date))
-	print_rich("[color=cyan]Nexus Reimport:[/color] Composition inherited scenes: %s." % ", ".join(parts))
-
-func _multimesh_paths_from_index() -> Array[String]:
-	var asset_index := NexusUtils.load_index_json(
-		NexusPaths.asset_index_path(),
-		"asset_index.json",
-		false,
-	)
-	if asset_index.is_empty():
-		return []
-
-	var by_canonical: Dictionary = {}
-	for asset_id in asset_index.keys():
-		var entry = asset_index[asset_id]
-		if not entry is Dictionary:
-			continue
-		var rel_path: String = entry.get("relative_path", "")
-		if rel_path.is_empty():
-			continue
-		var gltf_path := NexusUtils.validate_index_path(rel_path)
-		if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
-			continue
-		if not NexusSceneUtils.is_multimesh_manifest(gltf_path):
-			continue
-		by_canonical[gltf_path] = true
-
-	var paths: Array[String] = []
-	for key in by_canonical.keys():
-		paths.append(key)
-	return NexusSceneUtils.sort_gltf_paths_with_placeholder_defer(paths)
-
-func _evaluate_multimesh_inherited_scene_candidates(
-	wrapper_builder: NexusWrapperBuilder,
-	gltf_paths: PackedStringArray,
-	do_queue: bool
-) -> Dictionary:
-	var ready_to_queue: Array[String] = []
-	var waiting_on_sources: Array[String] = []
-	var waiting_on_import: Array[String] = []
-	var skipped_up_to_date: Array[String] = []
-
-	var paths_to_scan: Array[String] = []
-	if gltf_paths.is_empty():
-		paths_to_scan = _multimesh_paths_from_index()
-	else:
-		for path in gltf_paths:
-			if path is String and not path.is_empty():
-				paths_to_scan.append(path)
-
-	for gltf_path in paths_to_scan:
-		if not NexusSceneUtils.should_create_packed_scene(gltf_path):
-			continue
-		if not NexusSceneUtils.is_multimesh_manifest(gltf_path):
-			continue
-		if not wrapper_builder.needs_scene_processing(gltf_path):
-			skipped_up_to_date.append(gltf_path.get_file())
-			continue
-		var stage_info := NexusSceneUtils.multimesh_pipeline_stage(gltf_path)
-		var stage: String = str(stage_info.get("stage", ""))
-		match stage:
-			NexusSceneUtils.MULTIMESH_STAGE_SOURCES:
-				waiting_on_sources.append(gltf_path.get_file())
-			NexusSceneUtils.MULTIMESH_STAGE_MANIFEST:
-				waiting_on_import.append(gltf_path.get_file())
-			NexusSceneUtils.MULTIMESH_STAGE_INHERITED:
-				if wrapper_builder.is_scene_queued(gltf_path):
-					continue
-				ready_to_queue.append(gltf_path)
-				if do_queue:
-					wrapper_builder.queue_scene(gltf_path)
-			NexusSceneUtils.MULTIMESH_STAGE_DONE:
-				skipped_up_to_date.append(gltf_path.get_file())
-
-	return {
-		"ready_to_queue": ready_to_queue,
-		"waiting_on_sources": waiting_on_sources,
-		"waiting_on_import": waiting_on_import,
-		"skipped_up_to_date": skipped_up_to_date,
-	}
-
-func _log_multimesh_scene_queue_summary(evaluation: Dictionary) -> void:
-	var queued_count: int = evaluation.get("ready_to_queue", []).size()
-	var waiting_sources: Array = evaluation.get("waiting_on_sources", [])
-	var waiting_import: Array = evaluation.get("waiting_on_import", [])
-	var up_to_date: Array = evaluation.get("skipped_up_to_date", [])
-
-	if (
-		queued_count == 0
-		and waiting_sources.is_empty()
-		and waiting_import.is_empty()
-		and up_to_date.is_empty()
-	):
-		return
-
-	var parts: PackedStringArray = []
-	if queued_count > 0:
-		parts.append("queued %d" % queued_count)
-	if not waiting_sources.is_empty():
-		parts.append("skipped_sources: [%s]" % ", ".join(waiting_sources))
-	if not waiting_import.is_empty():
-		parts.append("skipped_import: [%s]" % ", ".join(waiting_import))
-	if not up_to_date.is_empty():
-		parts.append("skipped_up_to_date: [%s]" % ", ".join(up_to_date))
-	print_rich("[color=cyan]Nexus Reimport:[/color] MultiMesh inherited scenes: %s." % ", ".join(parts))
+func prime_nexus_import_configs() -> int:
+	return _config_fixer.prime_nexus_import_configs()
 
 func on_resources_reimported(
 	resources: PackedStringArray,
 	wrapper_builder: NexusWrapperBuilder,
 	on_scan_needed: Callable
 ) -> bool:
-	note_resources_reimported(resources)
+	note_resources_reimported(resources, wrapper_builder)
 
 	if NexusBatchLock.is_active():
 		for path in resources:
@@ -738,105 +519,154 @@ func on_resources_reimported(
 		return false
 
 	var activity_detected := false
-
 	if NexusImportContext.is_mass_import_active():
-		for path in resources:
-			var ext = path.get_extension().to_lower()
-			if ext == "gltf" or ext == "glb":
-				if _should_defer_config_fix(path):
-					if path not in _deferred_config_paths:
-						_deferred_config_paths.append(path)
-					activity_detected = true
-				if (
-					NexusPaths.auto_import_enabled()
-					and NexusSceneUtils.should_create_packed_scene(path)
-					and wrapper_builder.needs_scene_processing(path)
-				):
-					if NexusSceneUtils.is_composition_gltf(path):
-						pass
-					elif _mass_import_wrapper_flushed.has(path):
-						var skip_flushed := false
-						if NexusSceneUtils.is_multimesh_manifest(path):
-							var import_ready := NexusSceneUtils.multimesh_import_ready(path)
-							var tscn_path := NexusPaths.scene_path_for(
-								path, NexusSceneUtils.preferred_scene_style_for_gltf(path)
-							)
-							skip_flushed = (
-								import_ready.get("ok", false) and FileAccess.file_exists(tscn_path)
-							)
-						else:
-							skip_flushed = not NexusSceneUtils.gltf_needs_reimport(path)
-							# Missing .tscn after FS delete must recreate even if mass-import flushed.
-							var flushed_tscn := NexusPaths.scene_path_for(
-								path, NexusSceneUtils.preferred_scene_style_for_gltf(path)
-							)
-							if not FileAccess.file_exists(flushed_tscn):
-								skip_flushed = false
-						if not skip_flushed and path not in _deferred_wrapper_paths:
-							_deferred_wrapper_paths.append(path)
-							activity_detected = true
-					elif path not in _deferred_wrapper_paths:
-						_deferred_wrapper_paths.append(path)
-						activity_detected = true
-				if NexusPaths.auto_import_enabled() and _is_multimesh_manifest(path):
-					on_scan_needed.call(true)
-					activity_detected = true
-			elif ext in ["tres", "png", "jpg", "jpeg", "webp"]:
-				activity_detected = true
+		activity_detected = _handle_mass_import_reimported(resources, wrapper_builder, on_scan_needed)
 		_finish_batch_paths_from_signal(resources, wrapper_builder)
 		if activity_detected:
 			cooldown_remaining = SAFETY_FRAMES_ASSET
 		return activity_detected
 
-	for path in resources:
-		var ext = path.get_extension().to_lower()
-		if ext == "gltf" or ext == "glb":
-			if _should_defer_config_fix(path):
-				if path not in _config_deferred_queue:
-					_config_deferred_queue.append(path)
-				_plugin.call_deferred("_nexus_apply_deferred_config_writes")
-				activity_detected = true
-			elif (
-				NexusPaths.auto_import_enabled()
-				and NexusSceneUtils.should_create_packed_scene(path)
-				and wrapper_builder.needs_scene_processing(path)
-			):
-				wrapper_builder.queue_scene(path)
-				activity_detected = true
-			elif NexusPaths.auto_import_enabled() and _is_multimesh_manifest(path):
-				if NexusSceneUtils.multimesh_manifest_import_complete(path):
-					NexusImportContext.clear_multimesh_retry(path)
-					if wrapper_builder.needs_scene_processing(path):
-						wrapper_builder.queue_scene(path)
-						activity_detected = true
-					else:
-						_request_multimesh_inherited_scene_queue()
-				elif _plugin and _plugin.has_method("handle_multimesh_inherited_failure"):
-					var stage: String = str(
-						NexusSceneUtils.multimesh_pipeline_stage(path).get("stage", "")
-					)
-					if stage == NexusSceneUtils.MULTIMESH_STAGE_SOURCES:
-						seed_deferred_multimesh_paths([path])
-						_request_multimesh_wave()
-					elif stage == NexusSceneUtils.MULTIMESH_STAGE_MANIFEST:
-						_plugin.handle_multimesh_inherited_failure(
-							path, str(NexusSceneUtils.multimesh_pipeline_stage(path).get("reason", ""))
-						)
-				on_scan_needed.call(true)
-				activity_detected = true
-		elif ext in ["tres", "png", "jpg", "jpeg", "webp"]:
-			activity_detected = true
+	activity_detected = _handle_normal_reimported(resources, wrapper_builder, on_scan_needed)
 
 	if not _pending_reimport_after_signal.is_empty():
 		var resources_arr: Array[String] = []
 		for i in range(resources.size()):
 			resources_arr.append(resources[i])
-		_plugin.call_deferred("_nexus_flush_pending_reimport_queue", resources_arr)
+		_schedule_flush_pending_reimport(resources_arr)
 
 	_finish_batch_paths_from_signal(resources, wrapper_builder)
 	if activity_detected:
 		cooldown_remaining = SAFETY_FRAMES_ASSET
 	return activity_detected
+
+
+func _handle_mass_import_reimported(
+	resources: PackedStringArray,
+	wrapper_builder: NexusWrapperBuilder,
+	on_scan_needed: Callable
+) -> bool:
+	var activity_detected := false
+	for path in resources:
+		var ext = path.get_extension().to_lower()
+		if ext in ["tres", "png", "jpg", "jpeg", "webp"]:
+			activity_detected = true
+			continue
+		if ext != "gltf" and ext != "glb":
+			continue
+
+		if _should_defer_config_fix(path):
+			if path not in _deferred_config_paths:
+				_deferred_config_paths.append(path)
+			activity_detected = true
+
+		if _maybe_defer_mass_import_wrapper(path, wrapper_builder):
+			activity_detected = true
+
+		if NexusPaths.auto_import_enabled() and NexusMultiMeshUtils.is_multimesh_manifest(path):
+			on_scan_needed.call(true)
+			activity_detected = true
+	return activity_detected
+
+
+func _maybe_defer_mass_import_wrapper(path: String, wrapper_builder: NexusWrapperBuilder) -> bool:
+	if not NexusPaths.auto_import_enabled():
+		return false
+	if not NexusSceneUtils.should_create_packed_scene(path):
+		return false
+	if not wrapper_builder.needs_scene_processing(path):
+		return false
+	# Compositions stay deferred until Wave 2; do not queue wrappers during mass import.
+	if NexusSceneUtils.is_composition_gltf(path):
+		return false
+
+	if _mass_import_wrapper_flushed.has(path):
+		if _should_skip_flushed_mass_import_wrapper(path):
+			return false
+
+	if path in _deferred_wrapper_paths:
+		return false
+	_deferred_wrapper_paths.append(path)
+	return true
+
+
+func _should_skip_flushed_mass_import_wrapper(path: String) -> bool:
+	if NexusMultiMeshUtils.is_multimesh_manifest(path):
+		var import_ready := NexusMultiMeshUtils.multimesh_import_ready(path)
+		var tscn_path := NexusPaths.scene_path_for(
+			path, NexusSceneUtils.preferred_scene_style_for_gltf(path)
+		)
+		return (
+			import_ready.get("ok", false)
+			and FileAccess.file_exists(tscn_path)
+			and NexusSceneCompleteness.scene_is_complete(path, tscn_path)
+		)
+
+	if NexusSceneUtils.gltf_needs_reimport(path):
+		return false
+	# Missing or incomplete .tscn after FS delete / aborted build must recreate.
+	var flushed_tscn := NexusPaths.scene_path_for(
+		path, NexusSceneUtils.preferred_scene_style_for_gltf(path)
+	)
+	if not FileAccess.file_exists(flushed_tscn):
+		return false
+	return NexusSceneCompleteness.scene_is_complete(path, flushed_tscn)
+
+
+func _handle_normal_reimported(
+	resources: PackedStringArray,
+	wrapper_builder: NexusWrapperBuilder,
+	on_scan_needed: Callable
+) -> bool:
+	var activity_detected := false
+	for path in resources:
+		var ext = path.get_extension().to_lower()
+		if ext in ["tres", "png", "jpg", "jpeg", "webp"]:
+			activity_detected = true
+			continue
+		if ext != "gltf" and ext != "glb":
+			continue
+
+		if _should_defer_config_fix(path):
+			if path not in _config_deferred_queue:
+				_config_deferred_queue.append(path)
+			_schedule_deferred_config_writes()
+			activity_detected = true
+			continue
+
+		if (
+			NexusPaths.auto_import_enabled()
+			and NexusSceneUtils.should_create_packed_scene(path)
+			and wrapper_builder.needs_scene_processing(path)
+		):
+			wrapper_builder.queue_scene(path)
+			activity_detected = true
+			continue
+
+		if not NexusPaths.auto_import_enabled() or not NexusMultiMeshUtils.is_multimesh_manifest(path):
+			continue
+
+		if NexusMultiMeshUtils.multimesh_manifest_import_complete(path):
+			NexusImportContext.clear_multimesh_retry(path)
+			if wrapper_builder.needs_scene_processing(path):
+				wrapper_builder.queue_scene(path)
+				activity_detected = true
+			else:
+				_request_multimesh_inherited_scene_queue()
+		elif _plugin and _plugin.has_method("handle_multimesh_inherited_failure"):
+			var stage: String = str(
+				NexusMultiMeshUtils.multimesh_pipeline_stage(path).get("stage", "")
+			)
+			if stage == NexusMultiMeshUtils.MULTIMESH_STAGE_SOURCES:
+				seed_deferred_multimesh_paths([path])
+				_request_multimesh_wave()
+			elif stage == NexusMultiMeshUtils.MULTIMESH_STAGE_MANIFEST:
+				_plugin.handle_multimesh_inherited_failure(
+					path, str(NexusMultiMeshUtils.multimesh_pipeline_stage(path).get("reason", ""))
+				)
+		on_scan_needed.call(true)
+		activity_detected = true
+	return activity_detected
+
 
 func _finish_batch_paths_from_signal(
 	resources: PackedStringArray, wrapper_builder: NexusWrapperBuilder = null
@@ -928,7 +758,7 @@ func seed_deferred_composition_paths(paths: Array) -> int:
 		var canonical := NexusUtils.to_res_gltf_path(path)
 		if canonical.is_empty():
 			canonical = path
-		if NexusSceneUtils.is_multimesh_manifest(canonical):
+		if NexusMultiMeshUtils.is_multimesh_manifest(canonical):
 			continue
 		if canonical not in _deferred_composition_gltf_paths:
 			_deferred_composition_gltf_paths.append(canonical)
@@ -944,7 +774,7 @@ func seed_deferred_multimesh_paths(paths: Array) -> int:
 		var canonical := NexusUtils.to_res_gltf_path(path)
 		if canonical.is_empty():
 			canonical = path
-		if not NexusSceneUtils.is_multimesh_manifest(canonical):
+		if not NexusMultiMeshUtils.is_multimesh_manifest(canonical):
 			continue
 		if canonical not in _deferred_multimesh_paths:
 			_deferred_multimesh_paths.append(canonical)
@@ -1013,7 +843,7 @@ func collect_stale_paths(candidates: Array[String], asset_index: Dictionary) -> 
 			var startup_tscn := NexusPaths.scene_path_for(
 				canonical, NexusSceneUtils.preferred_scene_style_for_gltf(canonical)
 			)
-			if not FileAccess.file_exists(startup_tscn):
+			if not FileAccess.file_exists(startup_tscn) and not seen.has(canonical):
 				seen[canonical] = true
 				stale_paths.append(canonical)
 	return stale_paths
@@ -1042,23 +872,6 @@ func collect_startup_stale_paths() -> Dictionary:
 
 	return {"gltf_paths": collect_stale_paths(candidates, asset_index)}
 
-func collect_stale_index_reimport_paths(_wrapper_builder: NexusWrapperBuilder) -> Dictionary:
-	var startup := collect_startup_stale_paths()
-	var gltf_paths: Array = startup.get("gltf_paths", [])
-	var dirs_to_scan: Dictionary = {}
-	for path in gltf_paths:
-		dirs_to_scan[path.get_base_dir()] = true
-	var texture_paths: Array[String] = []
-	for dir_path in dirs_to_scan.keys():
-		texture_paths.append_array(
-			NexusSceneUtils.collect_files_with_extensions(dir_path, ["png", "jpg", "jpeg", "webp"])
-		)
-	return {
-		"gltf_paths": gltf_paths,
-		"wrapper_only_paths": [],
-		"texture_paths": texture_paths,
-	}
-
 func queue_indexed_dependents_for_changed(
 	changed_gltf_paths: Array, wrapper_builder: NexusWrapperBuilder = null
 ) -> int:
@@ -1075,13 +888,13 @@ func queue_indexed_dependents_for_changed(
 				canonical = path
 			if wrapper_builder.is_inherited_aborted(canonical):
 				# Multimesh must rebuild when sources get Nexus materials; composition abort stays.
-				if NexusSceneUtils.is_multimesh_manifest(canonical):
+				if NexusMultiMeshUtils.is_multimesh_manifest(canonical):
 					wrapper_builder.clear_inherited_abort(canonical)
-					NexusSceneUtils.invalidate_multimesh_pipeline_cache(canonical)
+					NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(canonical)
 				else:
 					continue
-			elif NexusSceneUtils.is_multimesh_manifest(canonical):
-				NexusSceneUtils.invalidate_multimesh_pipeline_cache(canonical)
+			elif NexusMultiMeshUtils.is_multimesh_manifest(canonical):
+				NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(canonical)
 			kept.append(canonical)
 		dependents = kept
 		if dependents.is_empty():
@@ -1096,9 +909,9 @@ func queue_indexed_dependents_for_changed(
 		if canonical.is_empty():
 			canonical = path
 		if wrapper_builder != null and wrapper_builder.is_inherited_aborted(canonical):
-			if NexusSceneUtils.is_multimesh_manifest(canonical):
+			if NexusMultiMeshUtils.is_multimesh_manifest(canonical):
 				wrapper_builder.clear_inherited_abort(canonical)
-				NexusSceneUtils.invalidate_multimesh_pipeline_cache(canonical)
+				NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(canonical)
 			else:
 				continue
 		if canonical in _non_texture_paths:
@@ -1128,18 +941,6 @@ func apply_stale_catchup(
 		queue_catchup_reimport([], gltf_paths)
 	return true
 
-const _DEPENDENT_EXPORT_TYPES: Array[String] = ["COMBINED_ASSET", "ANIMATION_LIB", "MULTIMESH_MANIFEST", "LEVEL"]
-
-const _DEPENDENT_EXPORT_TYPE_ORDER: Dictionary = {
-	"COMBINED_ASSET": 0,
-	"ANIMATION_LIB": 1,
-	"MULTIMESH_MANIFEST": 2,
-	"LEVEL": 3,
-}
-
-func _dependent_export_type_priority(export_type: String) -> int:
-	return int(_DEPENDENT_EXPORT_TYPE_ORDER.get(export_type, 99))
-
 func queue_dependent_gltfs_from_index() -> int:
 	var asset_index := NexusUtils.load_index_json(
 		NexusPaths.asset_index_path(),
@@ -1160,7 +961,7 @@ func queue_dependent_gltfs_from_index() -> int:
 			continue
 		var meta := NexusUtils.get_nexus_metadata(gltf_path)
 		var export_type: String = meta.get("export_type", "")
-		if export_type not in _DEPENDENT_EXPORT_TYPES:
+		if not NexusExportOrder.is_dependent_export_type(export_type):
 			continue
 		if NexusImportContext.is_level_pending_instance_pass(gltf_path):
 			continue
@@ -1169,8 +970,8 @@ func queue_dependent_gltfs_from_index() -> int:
 	pending_paths.sort_custom(func(a: String, b: String) -> bool:
 		var meta_a := NexusUtils.get_nexus_metadata(a)
 		var meta_b := NexusUtils.get_nexus_metadata(b)
-		var pri_a := _dependent_export_type_priority(str(meta_a.get("export_type", "")))
-		var pri_b := _dependent_export_type_priority(str(meta_b.get("export_type", "")))
+		var pri_a := NexusExportOrder.export_type_priority(str(meta_a.get("export_type", "")))
+		var pri_b := NexusExportOrder.export_type_priority(str(meta_b.get("export_type", "")))
 		if pri_a != pri_b:
 			return pri_a < pri_b
 		return a < b
@@ -1189,15 +990,52 @@ func queue_dependent_gltfs_from_index() -> int:
 		_reimport_phase = PHASE_GLTF
 	return queued
 
+func _schedule_deferred_config_writes() -> void:
+	if _config_deferred_scheduled:
+		return
+	if _plugin == null or not is_instance_valid(_plugin):
+		return
+	_config_deferred_scheduled = true
+	_plugin.call_deferred("_nexus_apply_deferred_config_writes")
+
+
+func _schedule_flush_pending_reimport(just_reimported: Array) -> void:
+	for path in just_reimported:
+		if path not in _flush_pending_just_reimported:
+			_flush_pending_just_reimported.append(path)
+	if _flush_pending_scheduled:
+		return
+	if _plugin == null or not is_instance_valid(_plugin):
+		return
+	_flush_pending_scheduled = true
+	_plugin.call_deferred("_nexus_flush_pending_reimport_queue", [])
+
+
+func _arm_flush_fallback_timer() -> void:
+	if _flush_fallback_timer_active:
+		return
+	if _plugin == null or not is_instance_valid(_plugin):
+		return
+	var tree = _plugin.get_tree()
+	if tree == null:
+		return
+	_flush_fallback_timer_active = true
+	var timer = tree.create_timer(FLUSH_FALLBACK_TIMEOUT)
+	timer.timeout.connect(_on_flush_fallback_timeout)
+
+
 func apply_deferred_config_writes() -> void:
+	_config_deferred_scheduled = false
 	if NexusBatchLock.is_active():
-		_plugin.call_deferred("_nexus_apply_deferred_config_writes")
+		_schedule_deferred_config_writes()
 		return
 	if _config_deferred_queue.is_empty():
 		return
+	if _plugin == null or not is_instance_valid(_plugin):
+		return
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
 	if fs.is_scanning() or _reimport_in_progress or _batch_reimport_active:
-		_plugin.call_deferred("_nexus_apply_deferred_config_writes")
+		_schedule_deferred_config_writes()
 		return
 	var paths = _config_deferred_queue.duplicate()
 	_config_deferred_queue.clear()
@@ -1209,21 +1047,28 @@ func apply_deferred_config_writes() -> void:
 	if not paths.is_empty():
 		cooldown_remaining = SAFETY_FRAMES_HEAVY * 2
 		_pending_flush_ready = false
-		var timer = _plugin.get_tree().create_timer(FLUSH_FALLBACK_TIMEOUT)
-		timer.timeout.connect(_on_flush_fallback_timeout)
+		_arm_flush_fallback_timer()
 
 func flush_pending_reimport_queue(just_reimported: Array) -> void:
+	_flush_pending_scheduled = false
+	var merged: Array = just_reimported.duplicate()
+	for path in _flush_pending_just_reimported:
+		if path not in merged:
+			merged.append(path)
+	_flush_pending_just_reimported.clear()
 	if _pending_reimport_after_signal.is_empty():
 		return
 	if _reimport_in_progress or _batch_reimport_active:
-		_plugin.call_deferred("_nexus_flush_pending_reimport_queue", just_reimported)
+		_schedule_flush_pending_reimport(merged)
+		return
+	if _plugin == null or not is_instance_valid(_plugin):
 		return
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
 	if fs.is_scanning():
-		_plugin.call_deferred("_nexus_flush_pending_reimport_queue", just_reimported)
+		_schedule_flush_pending_reimport(merged)
 		return
 	var reimported_set: Dictionary = {}
-	for path in just_reimported:
+	for path in merged:
 		reimported_set[path] = true
 	for path in reimported_set:
 		_pending_reimport_after_signal.erase(path)
@@ -1238,71 +1083,6 @@ func flush_pending_reimport_queue(just_reimported: Array) -> void:
 		_reimport_phase = _initial_reimport_phase()
 	_pending_reimport_after_signal.clear()
 	_pending_flush_ready = false
-
-func fix_import_config_if_needed(gltf_path: String, do_write: bool = true) -> bool:
-	if not FileAccess.file_exists(gltf_path):
-		return false
-
-	var meta = NexusUtils.get_nexus_metadata(gltf_path)
-	if meta.is_empty():
-		return false
-
-	var import_config_path = gltf_path + ".import"
-	var import_config = ConfigFile.new()
-	var config_corrupt := false
-	if FileAccess.file_exists(import_config_path):
-		var loaded := NexusUtils.load_text_config(import_config_path)
-		import_config = loaded.config
-		if not loaded.ok:
-			config_corrupt = true
-			if loaded.corrupt:
-				NexusUtils.remove_corrupt_import_sidecar(import_config_path)
-			push_warning(
-				"Nexus: Could not load import config for %s."
-				% gltf_path.get_file()
-			)
-			import_config = ConfigFile.new()
-			_salvage_sidecar_fields(import_config, import_config_path)
-
-	if not config_corrupt and not NexusSceneUtils.import_config_has_drift(gltf_path, import_config, meta):
-		return false
-
-	if import_config.get_value("params", "import_script/path", "") != NexusPaths.IMPORT_POST_PROCESSOR:
-		import_config.set_value("params", "import_script/path", NexusPaths.IMPORT_POST_PROCESSOR)
-
-	if "root_type" in meta:
-		var desired = _root_type_string(meta["root_type"])
-		if import_config.get_value("params", "nodes/root_type", "") != desired:
-			import_config.set_value("params", "nodes/root_type", desired)
-
-	if _has_custom_lods(gltf_path):
-		if import_config.get_value("params", "meshes/generate_lods", true):
-			import_config.set_value("params", "meshes/generate_lods", false)
-
-	var light_mode = meta.get("nexus_light_bake_mode", -1)
-	if light_mode != -1:
-		var desired = 2 if light_mode == 1 else 0
-		if import_config.get_value("params", "meshes/light_baking", 0) != desired:
-			import_config.set_value("params", "meshes/light_baking", desired)
-
-	if _gltf_has_tangent_attributes(gltf_path):
-		if import_config.get_value("params", "meshes/ensure_tangents", true):
-			import_config.set_value("params", "meshes/ensure_tangents", false)
-
-	if config_corrupt:
-		import_config.set_value("remap", "importer", "scene")
-		import_config.set_value("remap", "importer_version", 1)
-		import_config.set_value("remap", "type", "PackedScene")
-
-	if do_write:
-		var err = import_config.save(import_config_path)
-		if err != OK:
-			push_error(
-				"Nexus: Failed to save import config for %s: %s"
-				% [gltf_path.get_file(), error_string(err)]
-			)
-			return false
-	return true
 
 func _reimport_safe_async_batch(paths: Array) -> void:
 	if NexusBatchLock.is_active():
@@ -1359,22 +1139,23 @@ func _reimport_safe_async_batch(paths: Array) -> void:
 func _safety_frames_for_paths(paths: Array) -> int:
 	for p in paths:
 		var path := str(p)
-		if NexusSceneUtils.is_composition_gltf(path) or NexusSceneUtils.is_multimesh_manifest(path):
+		if NexusSceneUtils.is_composition_gltf(path) or NexusMultiMeshUtils.is_multimesh_manifest(path):
 			return SAFETY_FRAMES_HEAVY
 	return SAFETY_FRAMES_ASSET
 
 
 func _on_flush_fallback_timeout() -> void:
+	_flush_fallback_timer_active = false
+	if _plugin == null or not is_instance_valid(_plugin):
+		return
 	if _pending_reimport_after_signal.is_empty():
 		return
 	if _reimport_in_progress or _batch_reimport_active:
-		var timer = _plugin.get_tree().create_timer(FLUSH_FALLBACK_TIMEOUT)
-		timer.timeout.connect(_on_flush_fallback_timeout)
+		_arm_flush_fallback_timer()
 		return
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
 	if fs.is_scanning():
-		var timer = _plugin.get_tree().create_timer(FLUSH_FALLBACK_TIMEOUT)
-		timer.timeout.connect(_on_flush_fallback_timeout)
+		_arm_flush_fallback_timer()
 		return
 	for path in _pending_reimport_after_signal.keys():
 		_route_path_to_queue(path)
@@ -1400,7 +1181,7 @@ func _route_gltf_path_to_queue(path: String) -> void:
 		if canonical not in _deferred_composition_gltf_paths:
 			_deferred_composition_gltf_paths.append(canonical)
 		return
-	if NexusImportContext.is_mass_import_active() and NexusSceneUtils.is_multimesh_manifest(canonical):
+	if NexusImportContext.is_mass_import_active() and NexusMultiMeshUtils.is_multimesh_manifest(canonical):
 		if canonical not in _deferred_multimesh_paths:
 			_deferred_multimesh_paths.append(canonical)
 		return
@@ -1471,202 +1252,3 @@ func _is_texture_path(path: String) -> bool:
 func _is_gltf_path(path: String) -> bool:
 	var ext = path.get_extension().to_lower()
 	return ext == "gltf" or ext == "glb"
-
-func _is_multimesh_manifest(gltf_path: String) -> bool:
-	var meta = NexusUtils.get_nexus_metadata(gltf_path)
-	return meta.get("export_type") == "MULTIMESH_MANIFEST"
-
-func _gltf_has_tangent_attributes(gltf_path: String) -> bool:
-	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
-		return false
-	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
-	return not json_text.is_empty() and "\"TANGENT\"" in json_text
-
-func _has_custom_lods(gltf_path: String) -> bool:
-	const SEARCH = "nexus_is_lod"
-	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
-		return false
-	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
-	return not json_text.is_empty() and SEARCH in json_text
-
-func prime_nexus_import_configs() -> int:
-	_purge_binary_import_sidecars()
-	var updated := 0
-	var reimport_paths: Array[String] = []
-	var asset_index := NexusUtils.load_index_json(
-		NexusPaths.asset_index_path(),
-		"asset_index.json",
-		false,
-	)
-	var gltf_to_index_entry := _index_entries_by_gltf_path(asset_index)
-
-	for asset_id in asset_index.keys():
-		var entry = asset_index[asset_id]
-		if not entry is Dictionary:
-			continue
-		var rel_path := str(entry.get("relative_path", ""))
-		var gltf_path := NexusUtils.validate_index_path(rel_path)
-		if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
-			continue
-		if _prime_import_config_for_path(gltf_path, reimport_paths):
-			updated += 1
-
-	for gltf_path in _discover_nexus_gltf_paths():
-		if gltf_to_index_entry.has(gltf_path):
-			continue
-		if _prime_import_config_for_path(gltf_path, reimport_paths):
-			updated += 1
-
-	# Config rewrite requires reimport; fs.update_file alone is not enough.
-	if not reimport_paths.is_empty():
-		queue_catchup_reimport([], reimport_paths)
-	return updated
-
-func _prime_import_config_for_path(
-	gltf_path: String, reimport_paths: Array[String]
-) -> bool:
-	if not fix_import_config_if_needed(gltf_path, true):
-		return false
-	# Sidecar rewrite makes the cached scene stale; always queue reimport.
-	if gltf_path not in reimport_paths:
-		reimport_paths.append(gltf_path)
-	return true
-
-func _index_entries_by_gltf_path(asset_index: Dictionary) -> Dictionary:
-	var result: Dictionary = {}
-	for asset_id in asset_index.keys():
-		var entry = asset_index[asset_id]
-		if not entry is Dictionary:
-			continue
-		var rel_path := str(entry.get("relative_path", ""))
-		var gltf_path := NexusUtils.validate_index_path(rel_path)
-		if gltf_path.is_empty():
-			continue
-		result[gltf_path] = entry
-	return result
-
-func _discover_nexus_gltf_paths() -> Array[String]:
-	var paths: Array[String] = []
-	var props_root := _props_root_dir()
-	if props_root.is_empty():
-		return paths
-	_collect_nexus_gltf_paths(props_root, paths)
-	return paths
-
-func _props_root_dir() -> String:
-	for candidate in ["res://props", "res://assets"]:
-		if DirAccess.dir_exists_absolute(candidate):
-			return candidate
-	return ""
-
-func _collect_nexus_gltf_paths(dir_path: String, out: Array[String]) -> void:
-	var dir = DirAccess.open(dir_path)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var name = dir.get_next()
-	while name != "":
-		if name.begins_with("."):
-			name = dir.get_next()
-			continue
-		var full = dir_path.path_join(name)
-		if dir.current_is_dir():
-			_collect_nexus_gltf_paths(full, out)
-		elif name.get_extension().to_lower() in ["gltf", "glb"]:
-			if not NexusUtils.get_nexus_metadata(full).is_empty():
-				out.append(full)
-		name = dir.get_next()
-	dir.list_dir_end()
-
-func _purge_binary_import_sidecars() -> void:
-	for root in ["res://props", "res://assets", "res://textures"]:
-		if DirAccess.dir_exists_absolute(root):
-			_purge_binary_import_sidecars_in_dir(root)
-
-func _purge_binary_import_sidecars_in_dir(dir_path: String) -> void:
-	var dir = DirAccess.open(dir_path)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var name = dir.get_next()
-	while name != "":
-		if name.begins_with("."):
-			name = dir.get_next()
-			continue
-		var full = dir_path.path_join(name)
-		if dir.current_is_dir():
-			_purge_binary_import_sidecars_in_dir(full)
-		elif name.ends_with(".import"):
-			if NexusUtils.remove_corrupt_import_sidecar(full):
-				if not _purged_binary_import_warned.has(full):
-					_purged_binary_import_warned[full] = true
-					push_warning(
-						"Nexus: Removed corrupt binary import sidecar '%s'."
-						% full.get_file()
-					)
-		name = dir.get_next()
-	dir.list_dir_end()
-
-func _salvage_sidecar_fields(config: ConfigFile, import_path: String) -> void:
-	var text := NexusUtils.read_utf8_text(import_path)
-	if text.is_empty():
-		return
-	var section := ""
-	for line_raw in text.split("\n", false):
-		var line = line_raw.strip_edges()
-		if line.is_empty() or line.begins_with("#"):
-			continue
-		if line.begins_with("[") and line.ends_with("]"):
-			section = line.substr(1, line.length() - 2)
-			continue
-		var eq = line.find("=")
-		if eq < 0 or section.is_empty():
-			continue
-		var key = line.substr(0, eq).strip_edges()
-		var value = _unquote_sidecar_value(line.substr(eq + 1).strip_edges())
-		if key.is_empty():
-			continue
-		config.set_value(section, key, value)
-
-func _unquote_sidecar_value(value: String) -> Variant:
-	if value.begins_with("[") and value.ends_with("]"):
-		var inner = value.substr(1, value.length() - 2)
-		var parts: Array[String] = []
-		var current := ""
-		var in_quotes := false
-		for i in range(inner.length()):
-			var ch = inner[i]
-			if ch == '"':
-				in_quotes = not in_quotes
-				continue
-			if ch == "," and not in_quotes:
-				parts.append(current.strip_edges())
-				current = ""
-				continue
-			current += ch
-		if not current.is_empty():
-			parts.append(current.strip_edges())
-		var arr: PackedStringArray = []
-		for part in parts:
-			arr.append(str(_unquote_sidecar_value(part)))
-		return arr
-	if value.length() >= 2 and value.begins_with('"') and value.ends_with('"'):
-		return value.substr(1, value.length() - 2).replace('\\"', '"')
-	if value == "true":
-		return true
-	if value == "false":
-		return false
-	if value == "null":
-		return null
-	return value
-
-func _root_type_string(nexus_type: String) -> String:
-	# VehicleBody3D is not supported by the glTF importer; post-import replaces RigidBody3D.
-	if nexus_type == "VEHICLE":
-		return "RigidBody3D"
-	var map = {
-		"NODE_3D": "Node3D", "STATIC": "StaticBody3D", "RIGID": "RigidBody3D",
-		"AREA": "Area3D", "CHARACTER_BODY": "CharacterBody3D",
-		"NAVMESH": "NavigationRegion3D", "ANIMATABLE": "AnimatableBody3D"
-	}
-	return map.get(nexus_type, "Node3D")

@@ -19,19 +19,19 @@ func advance_manifest(
 	gltf_path: String,
 	reimport_manager: NexusReimportManager
 ) -> bool:
-	if gltf_path.is_empty() or not NexusSceneUtils.is_multimesh_manifest(gltf_path):
+	if gltf_path.is_empty() or not NexusMultiMeshUtils.is_multimesh_manifest(gltf_path):
 		return false
 
-	var stage_info := NexusSceneUtils.multimesh_pipeline_stage(gltf_path)
+	var stage_info := NexusMultiMeshUtils.multimesh_pipeline_stage(gltf_path)
 	var stage: String = str(stage_info.get("stage", ""))
-	NexusSceneUtils.multimesh_pipeline_log_status(gltf_path)
+	NexusMultiMeshUtils.multimesh_pipeline_log_status(gltf_path)
 
 	match stage:
-		NexusSceneUtils.MULTIMESH_STAGE_SOURCES:
+		NexusMultiMeshUtils.MULTIMESH_STAGE_SOURCES:
 			reimport_manager.seed_deferred_multimesh_paths([gltf_path])
 			_request_multimesh_wave()
 			return true
-		NexusSceneUtils.MULTIMESH_STAGE_MANIFEST:
+		NexusMultiMeshUtils.MULTIMESH_STAGE_MANIFEST:
 			if not NexusImportContext.mark_multimesh_retry(gltf_path):
 				push_error(
 					"Nexus MultiMesh: Manifest reimport retries exhausted for '%s': %s"
@@ -44,12 +44,12 @@ func advance_manifest(
 	return false
 
 func advance_inherited(gltf_path: String, wrapper_builder: NexusWrapperBuilder) -> bool:
-	if gltf_path.is_empty() or not NexusSceneUtils.is_multimesh_manifest(gltf_path):
+	if gltf_path.is_empty() or not NexusMultiMeshUtils.is_multimesh_manifest(gltf_path):
 		return false
 
-	var stage_info := NexusSceneUtils.multimesh_pipeline_stage(gltf_path)
+	var stage_info := NexusMultiMeshUtils.multimesh_pipeline_stage(gltf_path)
 	var stage: String = str(stage_info.get("stage", ""))
-	if stage != NexusSceneUtils.MULTIMESH_STAGE_INHERITED:
+	if stage != NexusMultiMeshUtils.MULTIMESH_STAGE_INHERITED:
 		return false
 	if not wrapper_builder.needs_scene_processing(gltf_path):
 		return false
@@ -65,15 +65,15 @@ func on_manifest_reimport_done(
 	end_manifest_wave()
 	var queued := 0
 	for path in paths:
-		if path.is_empty() or not NexusSceneUtils.is_multimesh_manifest(path):
+		if path.is_empty() or not NexusMultiMeshUtils.is_multimesh_manifest(path):
 			continue
 		# Fresh manifest reimport clears a prior open-timeout abort.
 		wrapper_builder.clear_inherited_abort(path)
-		if NexusSceneUtils.multimesh_manifest_import_complete(path):
+		if NexusMultiMeshUtils.multimesh_manifest_import_complete(path):
 			NexusImportContext.clear_multimesh_retry(path)
 		if advance_inherited(path, wrapper_builder):
 			queued += 1
-		elif NexusSceneUtils.multimesh_pipeline_stage(path).get("stage") == NexusSceneUtils.MULTIMESH_STAGE_MANIFEST:
+		elif NexusMultiMeshUtils.multimesh_pipeline_stage(path).get("stage") == NexusMultiMeshUtils.MULTIMESH_STAGE_MANIFEST:
 			advance_manifest(path, reimport_manager)
 	return queued
 
@@ -87,12 +87,12 @@ func advance_pending_from_index(
 		return 0
 	var queued := 0
 	for gltf_path in _multimesh_paths_from_index():
-		var stage_info := NexusSceneUtils.multimesh_pipeline_stage_throttled(gltf_path)
+		var stage_info := NexusMultiMeshUtils.multimesh_pipeline_stage_throttled(gltf_path)
 		var stage: String = str(stage_info.get("stage", ""))
-		if stage == NexusSceneUtils.MULTIMESH_STAGE_INHERITED:
+		if stage == NexusMultiMeshUtils.MULTIMESH_STAGE_INHERITED:
 			if advance_inherited(gltf_path, wrapper_builder):
 				queued += 1
-		elif stage == NexusSceneUtils.MULTIMESH_STAGE_MANIFEST:
+		elif stage == NexusMultiMeshUtils.MULTIMESH_STAGE_MANIFEST:
 			advance_manifest(gltf_path, reimport_manager)
 	return queued
 
@@ -103,11 +103,11 @@ func handle_inherited_failure(
 ) -> void:
 	if gltf_path.is_empty():
 		return
-	NexusSceneUtils.multimesh_pipeline_log_status(gltf_path)
-	var stage: String = str(NexusSceneUtils.multimesh_pipeline_stage(gltf_path).get("stage", ""))
-	if stage == NexusSceneUtils.MULTIMESH_STAGE_MANIFEST:
+	NexusMultiMeshUtils.multimesh_pipeline_log_status(gltf_path)
+	var stage: String = str(NexusMultiMeshUtils.multimesh_pipeline_stage(gltf_path).get("stage", ""))
+	if stage == NexusMultiMeshUtils.MULTIMESH_STAGE_MANIFEST:
 		advance_manifest(gltf_path, reimport_manager)
-	elif stage == NexusSceneUtils.MULTIMESH_STAGE_SOURCES:
+	elif stage == NexusMultiMeshUtils.MULTIMESH_STAGE_SOURCES:
 		reimport_manager.seed_deferred_multimesh_paths([gltf_path])
 		_request_multimesh_wave()
 	else:
@@ -136,7 +136,7 @@ func _multimesh_paths_from_index() -> Array[String]:
 		var gltf_path := NexusUtils.validate_index_path(rel_path)
 		if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
 			continue
-		if NexusSceneUtils.is_multimesh_manifest(gltf_path):
+		if NexusMultiMeshUtils.is_multimesh_manifest(gltf_path):
 			by_canonical[gltf_path] = true
 
 	var paths: Array[String] = []

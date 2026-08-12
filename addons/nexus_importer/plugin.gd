@@ -12,6 +12,9 @@ const NexusEditorSceneGuardScript = preload(
 	"res://addons/nexus_importer/editor/nexus_editor_scene_guard.gd"
 )
 const NexusImportContextScript = preload("res://addons/nexus_importer/scripts/nexus_import_context.gd")
+const NexusSceneCompleteness = preload(
+	"res://addons/nexus_importer/scripts/nexus_scene_completeness.gd"
+)
 const MultiMeshImportOrchestratorScript = preload(
 	"res://addons/nexus_importer/editor/multimesh_import_orchestrator.gd"
 )
@@ -103,22 +106,28 @@ func _process(_delta):
 			_saw_fs_scanning = true
 		elif _saw_fs_scanning:
 			_editor_bootstrap_done = true
-			if _reimport_manager != null:
-				var primed := _reimport_manager.prime_nexus_import_configs()
-				if primed > 0:
-					print_rich(
-						"[color=yellow]Nexus:[/color] Primed import config for %d glTF asset(s)."
-						% primed
-					)
+			var primed := _reimport_manager.prime_nexus_import_configs()
+			if primed > 0:
+				print_rich(
+					"[color=yellow]Nexus:[/color] Primed import config for %d glTF asset(s)."
+					% primed
+				)
 			_try_startup_import_catchup()
 		else:
 			return
 
 	var batch_locked := NexusBatchLockScript.is_active()
 	if batch_locked:
+		# Close one Nexus tab per frame during batch lock to avoid stale
+		# edited_scene indices (Godot 4.7+ crash on multi-tab sync close).
 		if not _batch_lock_scene_guard_applied:
-			_batch_lock_scene_guard_applied = true
-			NexusEditorSceneGuardScript.close_open_nexus_asset_tabs_if_any(get_editor_interface())
+			var guard_result: Dictionary = (
+				NexusEditorSceneGuardScript.close_one_open_nexus_asset_tab_if_any(
+					get_editor_interface()
+				)
+			)
+			if int(guard_result.get("remaining", 0)) <= 0:
+				_batch_lock_scene_guard_applied = true
 		_batch_lock_was_active = true
 		return
 	_batch_lock_scene_guard_applied = false
@@ -442,7 +451,7 @@ func _resources_include_multimesh_manifest(resources: PackedStringArray) -> bool
 		var ext := resource.get_extension().to_lower()
 		if ext != "gltf" and ext != "glb":
 			continue
-		if NexusSceneUtils.is_multimesh_manifest(resource):
+		if NexusMultiMeshUtils.is_multimesh_manifest(resource):
 			return true
 	return false
 
@@ -465,8 +474,8 @@ func _on_resources_reimported(resources: PackedStringArray):
 		_fs_comp_resolution_reimport_active = false
 		NexusImportContextScript.set_composition_resolution_reimport(false)
 	for resource in resources:
-		if NexusSceneUtils.is_multimesh_manifest(resource):
-			NexusSceneUtils.invalidate_multimesh_pipeline_cache(resource)
+		if NexusMultiMeshUtils.is_multimesh_manifest(resource):
+			NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(resource)
 		elif (
 			not was_composition_resolution
 			and NexusSceneUtils.is_composition_gltf(resource)
@@ -564,15 +573,15 @@ func request_multimesh_inherited_scene_queue() -> void:
 func ensure_multimesh_gltf_cache_ready_async(gltf_path: String) -> bool:
 	if _reimport_manager == null or gltf_path.is_empty():
 		return false
-	if not NexusSceneUtils.is_multimesh_manifest(gltf_path):
+	if not NexusMultiMeshUtils.is_multimesh_manifest(gltf_path):
 		return false
 
 	const MAX_ATTEMPTS := NexusImportContextScript.MAX_MULTIMESH_REIMPORT_RETRIES
 	for attempt in range(MAX_ATTEMPTS):
-		if NexusSceneUtils.multimesh_manifest_import_complete(gltf_path):
+		if NexusMultiMeshUtils.multimesh_manifest_import_complete(gltf_path):
 			return true
 
-		var sources_ready := NexusSceneUtils.multimesh_sources_ready(gltf_path)
+		var sources_ready := NexusMultiMeshUtils.multimesh_sources_ready(gltf_path)
 		if not sources_ready.get("ok", false):
 			await _reimport_multimesh_source_dependencies(gltf_path)
 
@@ -583,13 +592,13 @@ func ensure_multimesh_gltf_cache_ready_async(gltf_path: String) -> bool:
 			_reimport_manager.fix_import_config_if_needed(gltf_path, true)
 		await _reimport_gltf_and_wait(gltf_path)
 		await _wait_for_import_idle()
-		NexusSceneUtils.invalidate_multimesh_pipeline_cache(gltf_path)
+		NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(gltf_path)
 		ResourceLoader.load(gltf_path, "", ResourceLoader.CACHE_MODE_REPLACE)
 
-	if NexusSceneUtils.multimesh_manifest_import_complete(gltf_path):
+	if NexusMultiMeshUtils.multimesh_manifest_import_complete(gltf_path):
 		return true
 
-	var stage_info := NexusSceneUtils.multimesh_pipeline_stage(gltf_path)
+	var stage_info := NexusMultiMeshUtils.multimesh_pipeline_stage(gltf_path)
 	push_error(
 		"Nexus MultiMesh: Import cache not ready for '%s' after %d attempts (stage=%s: %s)."
 		% [
@@ -643,9 +652,10 @@ func ensure_nexus_gltf_imported_async(gltf_path: String) -> bool:
 	if _reimport_manager == null or gltf_path.is_empty():
 		return false
 
-	if not NexusSceneUtils.is_multimesh_manifest(gltf_path):
+	if not NexusMultiMeshUtils.is_multimesh_manifest(gltf_path):
 		if _reimport_manager.was_recently_reimported(gltf_path):
-			return ResourceLoader.exists(gltf_path)
+			if _recent_reimport_allows_skip(gltf_path):
+				return ResourceLoader.exists(gltf_path)
 		var needs_reimport := NexusSceneUtils.gltf_needs_reimport(gltf_path)
 		if NexusSceneUtils.nexus_import_config_needs_fix(gltf_path):
 			if _reimport_manager.fix_import_config_if_needed(gltf_path, true):
@@ -662,6 +672,19 @@ func ensure_nexus_gltf_imported_async(gltf_path: String) -> bool:
 		return ResourceLoader.exists(gltf_path)
 
 	return await ensure_multimesh_gltf_cache_ready_async(gltf_path)
+
+
+func _recent_reimport_allows_skip(gltf_path: String) -> bool:
+	if not NexusSceneUtils.should_create_packed_scene(gltf_path):
+		return true
+	var scene_style := NexusSceneUtils.preferred_scene_style_for_gltf(gltf_path)
+	if scene_style == NexusPaths.SCENE_STYLE_DISABLED:
+		return true
+	var tscn_path := NexusPaths.scene_path_for(gltf_path, scene_style)
+	if not FileAccess.file_exists(tscn_path):
+		# Wrapper not built yet; glTF import itself is fresh enough.
+		return true
+	return NexusSceneCompleteness.scene_is_complete(gltf_path, tscn_path)
 
 
 func request_composition_instance_resolution_reimport(gltf_path: String) -> void:
@@ -687,7 +710,7 @@ func _reimport_gltf_and_wait(gltf_path: String) -> void:
 	if _reimport_manager == null:
 		return
 	_reimport_manager.prepare_editor_scenes_for_reimport([gltf_path])
-	if NexusSceneUtils.is_multimesh_manifest(gltf_path):
+	if NexusMultiMeshUtils.is_multimesh_manifest(gltf_path):
 		_reimport_manager.queue_multimesh_manifest_reimport(gltf_path)
 	else:
 		_reimport_manager.queue_paths([gltf_path])
@@ -695,7 +718,7 @@ func _reimport_gltf_and_wait(gltf_path: String) -> void:
 
 
 func _reimport_multimesh_source_dependencies(manifest_gltf_path: String) -> void:
-	var asset_ids := NexusSceneUtils.collect_multimesh_manifest_source_asset_ids(manifest_gltf_path)
+	var asset_ids := NexusMultiMeshUtils.collect_multimesh_manifest_source_asset_ids(manifest_gltf_path)
 	var dep_gltfs := NexusSceneUtils.resolve_dependency_gltf_paths(asset_ids)
 	if dep_gltfs.is_empty():
 		return

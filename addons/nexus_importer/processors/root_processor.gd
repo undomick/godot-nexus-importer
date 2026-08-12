@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Sets physics properties (layers, masks, material) and RigidBody settings on the scene root.
-
 func set_collision_layers(node: Node, meta: Dictionary, stats: Dictionary) -> void:
 	if not node is CollisionObject3D:
 		return

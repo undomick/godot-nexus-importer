@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Applies vertex color attributes (e.g. Albedo Tint) from nexus_color_attributes.
-
 func process(node: Node, meta: Dictionary) -> void:
 	if not node is MeshInstance3D or not is_instance_valid(node.mesh):
 		return

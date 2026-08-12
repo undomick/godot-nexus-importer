@@ -5,8 +5,9 @@ extends RefCounted
 
 const InstancingProcessor = preload("res://addons/nexus_importer/processors/instancing_processor.gd")
 const MultiMeshProcessor = preload("res://addons/nexus_importer/processors/multimesh_processor.gd")
-
-const NEXUS_NODE_META := "NEXUS_NODE_METADATA"
+const NexusSceneCompleteness = preload(
+	"res://addons/nexus_importer/scripts/nexus_scene_completeness.gd"
+)
 
 const SCENE_LOAD_WAIT_FRAMES = 3
 const INHERITED_OPEN_ATTEMPTS = 5
@@ -15,6 +16,8 @@ const INHERITED_OPEN_WAIT_FRAMES_PER_ATTEMPT = 60
 const MAX_PLACEHOLDER_REIMPORT_RETRIES = 2
 # Abort after this many open timeouts so the re-queue loop cannot spin forever.
 const MAX_INHERITED_OPEN_TIMEOUTS = 2
+const MAX_BUILD_RETRIES = 3
+const BUILD_RETRY_BACKOFF_FRAMES = 30
 
 var _plugin: EditorPlugin
 var _queue: Dictionary = {}
@@ -23,6 +26,9 @@ var _wrapper_creation_in_progress: bool = false
 var _placeholder_retry_counts: Dictionary = {}
 var _inherited_open_timeout_counts: Dictionary = {}
 var _inherited_aborted: Dictionary = {}
+var _build_retry_counts: Dictionary = {}
+var _build_retry_cooldown_until: Dictionary = {}
+var _build_retry_exhausted: Dictionary = {}
 
 var scan_when_idle: bool = false
 
@@ -57,7 +63,7 @@ func queue_scene(gltf_path: String, scene_type: String = "") -> bool:
 			return false
 		if not NexusSceneUtils.composition_dependencies_ready(gltf_path):
 			return false
-	if NexusSceneUtils.is_multimesh_manifest(gltf_path):
+	if NexusMultiMeshUtils.is_multimesh_manifest(gltf_path):
 		if not _multimesh_scene_queue_allowed(gltf_path):
 			return false
 	var explicit_style := not scene_type.is_empty()
@@ -76,7 +82,7 @@ func queue_scene(gltf_path: String, scene_type: String = "") -> bool:
 	return true
 
 func _multimesh_scene_queue_allowed(gltf_path: String) -> bool:
-	return NexusSceneUtils.multimesh_can_queue_inherited_scene(gltf_path)
+	return NexusMultiMeshUtils.multimesh_can_queue_inherited_scene(gltf_path)
 
 func queue_scenes_in_folder(folder_path: String, scene_type: String) -> int:
 	if folder_path.is_empty() or scene_type.is_empty():
@@ -122,10 +128,15 @@ func tick_scene_creation(reimport_manager: NexusReimportManager) -> bool:
 func _highest_priority_queued_path() -> String:
 	if _queue.is_empty():
 		return ""
+	var now_frame := Engine.get_process_frames()
 	var best_path := ""
 	var best_priority := NexusExportOrder.PRIORITY_OTHER + 1
 	var best_defer := 2
 	for path in _queue.keys():
+		if _build_retry_cooldown_until.has(path):
+			if now_frame < int(_build_retry_cooldown_until[path]):
+				continue
+			_build_retry_cooldown_until.erase(path)
 		var priority := NexusExportOrder.export_type_priority_for_gltf(path)
 		var defer_rank := 1 if NexusSceneUtils.gltf_should_defer_within_priority(path) else 0
 		if priority < best_priority:
@@ -142,6 +153,10 @@ func _highest_priority_queued_path() -> String:
 
 func needs_scene_processing(gltf_path: String) -> bool:
 	if _inherited_aborted.has(gltf_path):
+		return false
+	if _is_build_retry_exhausted(gltf_path):
+		return false
+	if NexusSceneCompleteness.is_verified_recently(gltf_path):
 		return false
 	if not NexusSceneUtils.should_create_packed_scene(gltf_path):
 		return false
@@ -167,7 +182,7 @@ func needs_scene_processing(gltf_path: String) -> bool:
 
 	if NexusImportContext.is_mass_import_active():
 		if export_type == "MULTIMESH_MANIFEST":
-			var import_ready := NexusSceneUtils.multimesh_import_ready(gltf_path)
+			var import_ready := NexusMultiMeshUtils.multimesh_import_ready(gltf_path)
 			return not import_ready.get("ok", false) or not FileAccess.file_exists(tscn_path)
 		# Recreate when glTF is newer than the saved scene (batch-lock re-exports).
 		if not FileAccess.file_exists(tscn_path):
@@ -186,7 +201,7 @@ func needs_scene_processing(gltf_path: String) -> bool:
 		return true
 
 	if str(meta.get("export_type", "")) == "MULTIMESH_MANIFEST":
-		var import_ready := NexusSceneUtils.multimesh_import_ready(gltf_path)
+		var import_ready := NexusMultiMeshUtils.multimesh_import_ready(gltf_path)
 		if not import_ready.get("ok", false):
 			return true
 		if not FileAccess.file_exists(tscn_path):
@@ -198,78 +213,49 @@ func needs_scene_processing(gltf_path: String) -> bool:
 	if reg_gltf_mtime > reg_tscn_mtime:
 		return true
 
-	return _saved_scene_needs_update(gltf_path, meta, tscn_path, scene_style)
+	return not NexusSceneCompleteness.scene_is_complete(gltf_path, tscn_path)
 
-func _saved_scene_needs_update(
-	gltf_path: String, meta: Dictionary, tscn_path: String, scene_style: String
-) -> bool:
-	if not ResourceLoader.exists(tscn_path):
-		return true
-	var packed = ResourceLoader.load(tscn_path, "", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
-	if packed == null:
-		return true
-	var inst = packed.instantiate()
-	if inst == null:
-		return true
+func _is_build_retry_exhausted(gltf_path: String) -> bool:
+	if gltf_path.is_empty() or not _build_retry_exhausted.has(gltf_path):
+		return false
+	if not FileAccess.file_exists(gltf_path):
+		_build_retry_exhausted.erase(gltf_path)
+		return false
+	var locked_mtime := int(_build_retry_exhausted[gltf_path])
+	if FileAccess.get_modified_time(gltf_path) != locked_mtime:
+		_build_retry_exhausted.erase(gltf_path)
+		_build_retry_counts.erase(gltf_path)
+		return false
+	return true
 
-	var asset_name = gltf_path.get_file().get_basename()
-	var script_root: Node = inst
-	var resonance_root: Node = inst
-	if scene_style == NexusPaths.SCENE_STYLE_WRAPPER:
-		var gltf_child = inst.get_node_or_null(NodePath(asset_name))
-		if gltf_child == null:
-			inst.free()
-			return true
-		resonance_root = gltf_child
-
-	var target_script_path = NexusUtils.validate_index_path(str(meta.get("script_path", "")))
-	if not target_script_path.is_empty() and ResourceLoader.exists(target_script_path):
-		var current_script: Script = script_root.get_script()
-		var current_path := current_script.resource_path if current_script else ""
-		if current_path != target_script_path:
-			inst.free()
-			return true
-
-	if _has_resonance_nodes(gltf_path) and scene_style != NexusPaths.SCENE_STYLE_WRAPPER:
-		var expected_count := _expected_resonance_count(gltf_path)
-		var actual_count := _count_resonance_geometry_children(resonance_root)
-		if expected_count > 0 and actual_count < expected_count:
-			inst.free()
-			return true
-
-	inst.free()
-	return false
-
-func _expected_resonance_count(gltf_path: String) -> int:
+func reset_build_retries(gltf_path: String) -> void:
 	if gltf_path.is_empty():
-		return 0
-	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
-	if json_text.is_empty():
-		return 0
-	var json = JSON.new()
-	if json.parse(json_text) != OK:
-		return 0
-	var gltf = json.get_data()
-	if gltf == null:
-		return 0
-	var count := 0
-	var nodes = gltf.get("nodes", [])
-	for n in nodes:
-		var extras = n.get("extras", {})
-		var node_meta = extras.get("NEXUS_NODE_METADATA")
-		if node_meta is Dictionary:
-			var shape = node_meta.get("nexus_mesh_collision_shape", "")
-			if shape in ["RESONANCE_STATIC", "RESONANCE_DYNAMIC"]:
-				count += 1
-	return count
+		return
+	_build_retry_counts.erase(gltf_path)
+	_build_retry_cooldown_until.erase(gltf_path)
+	_build_retry_exhausted.erase(gltf_path)
+	NexusSceneCompleteness.invalidate(gltf_path)
 
-func _count_resonance_geometry_children(node: Node) -> int:
-	var count := 0
-	for child in node.get_children():
-		var cls = child.get_class()
-		if cls == "ResonanceStaticGeometry" or cls == "ResonanceDynamicGeometry":
-			count += 1
-	return count
+func _schedule_build_retry_or_exhaust(gltf_path: String, tscn_path: String) -> void:
+	NexusSceneCompleteness.invalidate(gltf_path)
+	var retries: int = int(_build_retry_counts.get(gltf_path, 0)) + 1
+	_build_retry_counts[gltf_path] = retries
+	if retries < MAX_BUILD_RETRIES:
+		_build_retry_cooldown_until[gltf_path] = (
+			Engine.get_process_frames() + retries * BUILD_RETRY_BACKOFF_FRAMES
+		)
+		queue_scene(gltf_path)
+		push_warning(
+			"Nexus: Scene '%s' incomplete after build; retry %d/%d."
+			% [tscn_path.get_file(), retries, MAX_BUILD_RETRIES]
+		)
+		return
+	var mtime := FileAccess.get_modified_time(gltf_path) if FileAccess.file_exists(gltf_path) else -1
+	_build_retry_exhausted[gltf_path] = mtime
+	push_error(
+		"Nexus: Scene '%s' still incomplete after %d build attempt(s); waiting for glTF change."
+		% [tscn_path.get_file(), MAX_BUILD_RETRIES]
+	)
 
 func _notify_scene_file_written() -> void:
 	if _plugin and _plugin.has_method("notify_scene_file_written"):
@@ -332,6 +318,13 @@ func build_wrapper_scene_async(gltf_path: String) -> void:
 			if fs:
 				fs.update_file(tscn_path)
 			_notify_scene_file_written()
+			root_node.free()
+			if not NexusSceneCompleteness.verify_and_mark(gltf_path, tscn_path):
+				_schedule_build_retry_or_exhaust(gltf_path, tscn_path)
+			else:
+				_build_retry_counts.erase(gltf_path)
+			_finish_wrapper_creation()
+			return
 		else:
 			push_error(
 				"Nexus Wrapper: Failed to save %s: %s" % [tscn_path.get_file(), error_string(err)]
@@ -366,9 +359,9 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 	var export_type = meta.get("export_type", "")
 
 	if export_type == "MULTIMESH_MANIFEST":
-		var stage_info := NexusSceneUtils.multimesh_pipeline_stage(gltf_path)
+		var stage_info := NexusMultiMeshUtils.multimesh_pipeline_stage(gltf_path)
 		var stage: String = str(stage_info.get("stage", ""))
-		if stage == NexusSceneUtils.MULTIMESH_STAGE_SOURCES:
+		if stage == NexusMultiMeshUtils.MULTIMESH_STAGE_SOURCES:
 			_handle_multimesh_inherited_failure(
 				gltf_path, str(stage_info.get("reason", "Source assets not ready"))
 			)
@@ -377,11 +370,11 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 		var imported_ok := true
 		if _plugin and _plugin.has_method("ensure_multimesh_gltf_cache_ready_async"):
 			imported_ok = await _plugin.ensure_multimesh_gltf_cache_ready_async(gltf_path)
-		if not imported_ok or not NexusSceneUtils.multimesh_manifest_import_complete(gltf_path):
+		if not imported_ok or not NexusMultiMeshUtils.multimesh_manifest_import_complete(gltf_path):
 			_handle_multimesh_inherited_failure(
 				gltf_path,
 				"Manifest import incomplete: %s"
-				% str(NexusSceneUtils.multimesh_pipeline_stage(gltf_path).get("reason", ""))
+				% str(NexusMultiMeshUtils.multimesh_pipeline_stage(gltf_path).get("reason", ""))
 			)
 			return
 
@@ -486,7 +479,7 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 	var anim_lib_path: String = root.get_meta("nexus_anim_lib_path", "")
 	var resonance_nodes: Array = root.get_meta("nexus_resonance_nodes", [])
 	attach_resonance_nodes(root, resonance_nodes)
-	if export_type != "COMBINED_ASSET" and export_type != "LEVEL":
+	if not NexusExportOrder.is_composition_export_type(export_type):
 		setup_animation_player(root, root, anim_lib_path, export_type)
 	if not target_script_path.is_empty():
 		assign_wrapper_script(root, target_script_path)
@@ -505,6 +498,11 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 	if fs:
 		fs.update_file(tscn_path)
 	_notify_scene_file_written()
+
+	if not NexusSceneCompleteness.verify_and_mark(gltf_path, tscn_path):
+		_schedule_build_retry_or_exhaust(gltf_path, tscn_path)
+	else:
+		_build_retry_counts.erase(gltf_path)
 
 	_finish_inherited_creation()
 
@@ -532,11 +530,13 @@ func clear_inherited_abort(gltf_path: String) -> void:
 	_inherited_aborted.erase(gltf_path)
 	_inherited_open_timeout_counts.erase(gltf_path)
 	_placeholder_retry_counts.erase(gltf_path)
+	reset_build_retries(gltf_path)
 
 func mark_inherited_aborted(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
 	_inherited_aborted[gltf_path] = true
+	NexusSceneCompleteness.invalidate(gltf_path)
 
 func is_inherited_aborted(gltf_path: String) -> bool:
 	return not gltf_path.is_empty() and _inherited_aborted.has(gltf_path)
@@ -554,7 +554,7 @@ func _inject_multimesh_tree_into_open_scene(
 ) -> bool:
 	if root == null or gltf_path.is_empty() or scene_meta.is_empty():
 		return false
-	if not NexusSceneUtils.multimesh_sidecar_resources_ready(gltf_path):
+	if not NexusMultiMeshUtils.multimesh_sidecar_resources_ready(gltf_path):
 		return false
 
 	var processor := MultiMeshProcessor.new()
@@ -821,28 +821,6 @@ func _has_physics_body_recursive(node: Node) -> bool:
 			return true
 	return false
 
-func _has_resonance_nodes(gltf_path: String) -> bool:
-	if gltf_path.is_empty():
-		return false
-	var json_text := NexusUtils.get_gltf_json_text(gltf_path)
-	if json_text.is_empty():
-		return false
-	var json = JSON.new()
-	if json.parse(json_text) != OK:
-		return false
-	var gltf = json.get_data()
-	if gltf == null:
-		return false
-	var nodes = gltf.get("nodes", [])
-	for n in nodes:
-		var extras = n.get("extras", {})
-		var node_meta = extras.get("NEXUS_NODE_METADATA")
-		if node_meta is Dictionary:
-			var shape = node_meta.get("nexus_mesh_collision_shape", "")
-			if shape in ["RESONANCE_STATIC", "RESONANCE_DYNAMIC"]:
-				return true
-	return false
-
 func _abort_composition_inherited_for_placeholders(gltf_path: String, reason: String) -> void:
 	mark_inherited_aborted(gltf_path)
 	_placeholder_retry_counts.erase(gltf_path)
@@ -864,9 +842,9 @@ func _composition_placeholders_have_missing_targets(root: Node) -> bool:
 			continue
 		if node.has_meta("extras"):
 			var extras = node.get_meta("extras")
-			if extras is Dictionary and "NEXUS_NODE_METADATA" in extras:
-				var node_meta = extras["NEXUS_NODE_METADATA"]
-				if node_meta is Dictionary:
+			if extras is Dictionary and NexusSceneUtils.NEXUS_NODE_META in extras:
+				var node_meta = NexusSceneUtils.nexus_meta_from_extras(extras)
+				if not node_meta.is_empty():
 					var asset_id := str(node_meta.get("nexus_asset_id", "")).strip_edges()
 					var placeholder_path := str(node_meta.get("nexus_placeholder_path", "")).strip_edges()
 					if asset_id.is_empty() and placeholder_path.is_empty():
@@ -1159,10 +1137,10 @@ func _resolve_asset_id_nodes_recursively(
 	if not node.scene_file_path.is_empty():
 		return
 	var extras = node.get_meta("extras")
-	if not extras is Dictionary or not NEXUS_NODE_META in extras:
+	if not extras is Dictionary or not NexusSceneUtils.NEXUS_NODE_META in extras:
 		return
-	var node_meta = extras[NEXUS_NODE_META]
-	if not node_meta is Dictionary:
+	var node_meta = NexusSceneUtils.nexus_meta_from_extras(extras)
+	if node_meta.is_empty():
 		return
 	if node_meta.has("nexus_asset_id") or node_meta.has("nexus_placeholder_path"):
 		processor.process(node, node_meta, root)

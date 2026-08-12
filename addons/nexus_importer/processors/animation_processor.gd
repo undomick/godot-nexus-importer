@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Extracts AnimationLibrary resources from imported glTF scenes.
-
 const NEXUS_ANIM_PLAYER_PATH = "AnimationPlayer"
 
 
@@ -314,10 +312,8 @@ func _remove_legacy_method_tracks(anim: Animation) -> void:
 
 
 func _find_anchor_node_name(node: Node) -> String:
-	if node.has_meta("extras"):
-		var extras = node.get_meta("extras")
-		if extras.get("NEXUS_NODE_METADATA", {}).get("nexus_is_anim_anchor", false):
-			return node.name
+	if NexusSceneUtils.get_node_nexus_meta(node).get("nexus_is_anim_anchor", false):
+		return node.name
 	for child in node.get_children():
 		var found = _find_anchor_node_name(child)
 		if found != "":

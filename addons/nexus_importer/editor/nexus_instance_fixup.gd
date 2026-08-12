@@ -3,8 +3,6 @@ extends RefCounted
 
 ## Resolves composition glTF placeholders in memory without a full glTF reimport.
 
-const NEXUS_NODE_META := "NEXUS_NODE_METADATA"
-
 const InstancingProcessor = preload("res://addons/nexus_importer/processors/instancing_processor.gd")
 
 var _instancing_processor: InstancingProcessor
@@ -57,11 +55,8 @@ func _resolve_instances_in_tree(root: Node) -> int:
 		for i in range(node.get_child_count() - 1, -1, -1):
 			stack.append(node.get_child(i))
 
-		var node_extras = node.get_meta("extras", {})
-		if not node_extras is Dictionary or NEXUS_NODE_META not in node_extras:
-			continue
-		var node_meta: Dictionary = node_extras[NEXUS_NODE_META]
-		if not node_meta is Dictionary:
+		var node_meta := NexusSceneUtils.get_node_nexus_meta(node)
+		if node_meta.is_empty():
 			continue
 		if node_meta.get("nexus_is_lod", false):
 			continue

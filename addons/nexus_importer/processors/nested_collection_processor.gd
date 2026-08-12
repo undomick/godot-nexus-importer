@@ -1,10 +1,6 @@
 @tool
 extends Object
 
-## Wraps inline nested collection subtrees with their configured Godot root types.
-
-const NEXUS_NODE_META := "NEXUS_NODE_METADATA"
-
 const RootProcessor = preload("res://addons/nexus_importer/processors/root_processor.gd")
 
 var _processed_nested_names: Dictionary = {}
@@ -99,31 +95,15 @@ func _reparent_member_under_wrapper(scene: Node, wrapper: Node, member_3d: Node3
 	var member_parent := member_3d.get_parent()
 	if member_parent == null:
 		return
-	var member_global := _composed_global_transform(member_3d)
+	var member_global := NexusTransformSanitize.composed_global_transform(member_3d)
 	member_parent.remove_child(member_3d)
 	member_3d.owner = null
 	wrapper.add_child(member_3d)
 	if wrapper is Node3D:
 		var wrapper_3d := wrapper as Node3D
-		var wrapper_global := _composed_global_transform(wrapper_3d)
+		var wrapper_global := NexusTransformSanitize.composed_global_transform(wrapper_3d)
 		member_3d.transform = wrapper_global.affine_inverse() * member_global
 	member_3d.owner = scene.owner if scene.owner else scene
-
-
-func _composed_global_transform(node_3d: Node3D) -> Transform3D:
-	if node_3d.is_inside_tree():
-		return node_3d.global_transform
-
-	var chain: Array[Node3D] = []
-	var current: Node = node_3d
-	while current is Node3D:
-		chain.push_front(current as Node3D)
-		current = current.get_parent()
-
-	var result := Transform3D.IDENTITY
-	for node in chain:
-		result = result * node.transform
-	return result
 
 
 func _collect_members_for_nested_name(root: Node, nested_name: String) -> Array[Node]:
@@ -164,9 +144,4 @@ func _collect_members_visit(node: Node, nested_name: String, members: Array[Node
 
 
 func _node_nexus_meta(node: Node) -> Dictionary:
-	var extras = node.get_meta("extras", {})
-	if extras is Dictionary and extras.has(NEXUS_NODE_META):
-		var node_meta = extras[NEXUS_NODE_META]
-		if node_meta is Dictionary:
-			return node_meta
-	return {}
+	return NexusSceneUtils.get_node_nexus_meta(node)

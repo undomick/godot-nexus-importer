@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Converts nexus_light metadata to OmniLight3D, SpotLight3D, DirectionalLight3D or AreaLight3D.
-
 const BLENDER_WATTS_TO_GODOT := 0.01
 const DIRECTIONAL_ENERGY_CAP := 5.0
 const DEFAULT_SHADOW_BIAS := 0.03

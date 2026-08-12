@@ -177,8 +177,86 @@ static func stabilize_editor_after_close(editor_interface: EditorInterface) -> v
 static func close_open_nexus_asset_tabs_if_any(editor_interface: EditorInterface) -> Dictionary:
 	var gltf_paths := collect_gltf_paths_from_open_nexus_tabs(editor_interface)
 	if gltf_paths.is_empty():
-		return {"closed": PackedStringArray()}
+		return {"closed": PackedStringArray(), "remaining": 0}
 	return close_open_scenes_for_reimport(editor_interface, gltf_paths)
+
+
+## Close at most one blocking Nexus tab. Used for phased close from _process.
+static func close_one_open_nexus_asset_tab_if_any(editor_interface: EditorInterface) -> Dictionary:
+	var closed := PackedStringArray()
+	var close_errors: Array = []
+	if editor_interface == null:
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
+
+	var gltf_paths := collect_gltf_paths_from_open_nexus_tabs(editor_interface)
+	if gltf_paths.is_empty():
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
+
+	var blocking := blocking_path_set_for_gltfs(gltf_paths)
+	if blocking.is_empty():
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
+
+	var to_close := _collect_tabs_to_close(editor_interface, blocking)
+	if to_close.is_empty():
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
+
+	NexusEditorViewportGuard.push_pause(editor_interface)
+	var result := _close_one_blocking_tab(editor_interface, to_close)
+	if result.get("closed_path", "") != "":
+		closed.append(str(result["closed_path"]))
+	if result.has("err"):
+		close_errors.append({"path": result.get("closed_path", ""), "err": result["err"]})
+	var remaining := _collect_tabs_to_close(editor_interface, blocking).size()
+	if remaining == 0:
+		stabilize_editor_after_close(editor_interface)
+	NexusEditorViewportGuard.pop_pause(editor_interface)
+	return {"closed": closed, "close_errors": close_errors, "remaining": remaining}
+
+
+static func _scene_still_open(editor_interface: EditorInterface, scene_path: String) -> bool:
+	if scene_path.is_empty():
+		return false
+	for open_path in editor_interface.get_open_scenes():
+		if open_path == scene_path:
+			return true
+	var edited_root = editor_interface.get_edited_scene_root()
+	if edited_root != null and is_instance_valid(edited_root) and edited_root.scene_file_path == scene_path:
+		return true
+	return false
+
+
+static func _close_one_blocking_tab(
+	editor_interface: EditorInterface, to_close: Array[String]
+) -> Dictionary:
+	var edited_root = editor_interface.get_edited_scene_root()
+	var edited_path := ""
+	if edited_root != null and is_instance_valid(edited_root) and not edited_root.scene_file_path.is_empty():
+		edited_path = edited_root.scene_file_path
+
+	# Prefer closing the currently edited blocking tab - avoids open_scene_from_path.
+	var scene_path := ""
+	if not edited_path.is_empty() and edited_path in to_close:
+		scene_path = edited_path
+	else:
+		for candidate in to_close:
+			if _scene_still_open(editor_interface, candidate):
+				scene_path = candidate
+				break
+
+	if scene_path.is_empty():
+		return {}
+
+	if edited_path != scene_path:
+		if not _scene_still_open(editor_interface, scene_path):
+			return {}
+		_clear_edited_flag(editor_interface)
+		editor_interface.open_scene_from_path(scene_path, false)
+
+	if editor_interface.get_edited_scene_root() == null:
+		return {}
+	_clear_edited_flag(editor_interface)
+	var close_err := editor_interface.close_scene()
+	return {"closed_path": scene_path, "err": close_err}
 
 
 static func close_open_scenes_for_reimport(
@@ -188,50 +266,42 @@ static func close_open_scenes_for_reimport(
 	var close_errors: Array = []
 
 	if editor_interface == null or gltf_paths.is_empty():
-		return {"closed": closed, "close_errors": close_errors}
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
 	var blocking := blocking_path_set_for_gltfs(gltf_paths)
 	if blocking.is_empty():
-		return {"closed": closed, "close_errors": close_errors}
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
 	var to_close := _collect_tabs_to_close(editor_interface, blocking)
-
 	if to_close.is_empty():
-		return {"closed": closed, "close_errors": close_errors}
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
 	NexusEditorViewportGuard.push_pause(editor_interface)
 
-	var edited_root = editor_interface.get_edited_scene_root()
-	var edited_path := ""
-	if edited_root != null and not edited_root.scene_file_path.is_empty():
-		edited_path = edited_root.scene_file_path
-
-	if not edited_path.is_empty() and edited_path in to_close:
-		var keeper_path: String = _find_keeper_scene_path(editor_interface, to_close)
-		if not keeper_path.is_empty():
-			_clear_edited_flag(editor_interface)
-			editor_interface.open_scene_from_path(keeper_path, false)
-
-	for scene_path in to_close:
-		edited_root = editor_interface.get_edited_scene_root()
-		edited_path = ""
-		if edited_root and not edited_root.scene_file_path.is_empty():
-			edited_path = edited_root.scene_file_path
-		if edited_path != scene_path:
-			_clear_edited_flag(editor_interface)
-			editor_interface.open_scene_from_path(scene_path, false)
-		if editor_interface.get_edited_scene_root() == null:
-			continue
-		_clear_edited_flag(editor_interface)
-		var close_err := editor_interface.close_scene()
-		close_errors.append({"path": scene_path, "err": close_err})
-		if close_err == OK or close_err == ERR_DOES_NOT_EXIST:
-			closed.append(scene_path)
+	# Re-collect after each close so edited_scene indices stay valid (Godot 4.7+).
+	var safety := 0
+	while safety < 64:
+		safety += 1
+		to_close = _collect_tabs_to_close(editor_interface, blocking)
+		if to_close.is_empty():
+			break
+		var result := _close_one_blocking_tab(editor_interface, to_close)
+		if result.is_empty():
+			break
+		var closed_path := str(result.get("closed_path", ""))
+		if closed_path != "":
+			closed.append(closed_path)
+		if result.has("err"):
+			close_errors.append({"path": closed_path, "err": result["err"]})
+		var close_err: int = int(result.get("err", FAILED))
+		if close_err != OK and close_err != ERR_DOES_NOT_EXIST:
+			break
 
 	stabilize_editor_after_close(editor_interface)
 	NexusEditorViewportGuard.pop_pause(editor_interface)
 
-	return {"closed": closed, "close_errors": close_errors}
+	var remaining := _collect_tabs_to_close(editor_interface, blocking).size()
+	return {"closed": closed, "close_errors": close_errors, "remaining": remaining}
 
 
 static func _settle_scene_tree(scene_tree: SceneTree, frame_count: int = SCENE_SWITCH_SETTLE_FRAMES) -> void:
@@ -250,51 +320,40 @@ static func close_open_scenes_for_reimport_async(
 	var close_errors: Array = []
 
 	if editor_interface == null or gltf_paths.is_empty():
-		return {"closed": closed, "close_errors": close_errors}
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
 	var blocking := blocking_path_set_for_gltfs(gltf_paths)
 	if blocking.is_empty():
-		return {"closed": closed, "close_errors": close_errors}
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
 	var to_close := _collect_tabs_to_close(editor_interface, blocking)
-
 	if to_close.is_empty():
-		return {"closed": closed, "close_errors": close_errors}
+		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
 	NexusEditorViewportGuard.push_pause(editor_interface)
 
-	var edited_root = editor_interface.get_edited_scene_root()
-	var edited_path := ""
-	if edited_root != null and not edited_root.scene_file_path.is_empty():
-		edited_path = edited_root.scene_file_path
-
-	if not edited_path.is_empty() and edited_path in to_close:
-		var keeper_path: String = _find_keeper_scene_path(editor_interface, to_close)
-		if not keeper_path.is_empty():
-			_clear_edited_flag(editor_interface)
-			editor_interface.open_scene_from_path(keeper_path, false)
-			await _settle_scene_tree(scene_tree)
-
-	for scene_path in to_close:
-		edited_root = editor_interface.get_edited_scene_root()
-		edited_path = ""
-		if edited_root and not edited_root.scene_file_path.is_empty():
-			edited_path = edited_root.scene_file_path
-		if edited_path != scene_path:
-			_clear_edited_flag(editor_interface)
-			editor_interface.open_scene_from_path(scene_path, false)
-			await _settle_scene_tree(scene_tree)
-		if editor_interface.get_edited_scene_root() == null:
-			continue
-		_clear_edited_flag(editor_interface)
-		var close_err := editor_interface.close_scene()
-		close_errors.append({"path": scene_path, "err": close_err})
-		if close_err == OK or close_err == ERR_DOES_NOT_EXIST:
-			closed.append(scene_path)
+	var safety := 0
+	while safety < 64:
+		safety += 1
+		to_close = _collect_tabs_to_close(editor_interface, blocking)
+		if to_close.is_empty():
+			break
+		var result := _close_one_blocking_tab(editor_interface, to_close)
+		if result.is_empty():
+			break
+		var closed_path := str(result.get("closed_path", ""))
+		if closed_path != "":
+			closed.append(closed_path)
+		if result.has("err"):
+			close_errors.append({"path": closed_path, "err": result["err"]})
 		await _settle_scene_tree(scene_tree)
+		var close_err: int = int(result.get("err", FAILED))
+		if close_err != OK and close_err != ERR_DOES_NOT_EXIST:
+			break
 
 	stabilize_editor_after_close(editor_interface)
 	await _settle_scene_tree(scene_tree)
 	NexusEditorViewportGuard.pop_pause(editor_interface)
 
-	return {"closed": closed, "close_errors": close_errors}
+	var remaining := _collect_tabs_to_close(editor_interface, blocking).size()
+	return {"closed": closed, "close_errors": close_errors, "remaining": remaining}

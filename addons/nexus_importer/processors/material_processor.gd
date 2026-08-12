@@ -1,7 +1,6 @@
 @tool
 extends Object
 
-## Swaps mesh materials based on nexus_material_id using material_index.json.
 ## Targets may be StandardMaterial3D, ORMMaterial3D, or ShaderMaterial (.tres + .gdshader from shader graph convert).
 ## For material_pipeline=gltf, externalize_embedded writes editable .tres sidecars next to the GLB.
 
@@ -14,12 +13,15 @@ var _warned_versions: Dictionary = {}
 var _externalize_cache: Dictionary = {}
 ## Reserved sidecar paths for this import (avoid name collisions before files exist).
 var _externalize_claimed_paths: Dictionary = {}
+## True when material_index relative_path was rewritten (.tres -> .material).
+var _index_dirty: bool = false
 
 func _load_material_index() -> bool:
 	var path = NexusPaths.material_index_path()
 	if not FileAccess.file_exists(path):
 		_index_mtime = -1
 		_material_index = {}
+		_index_dirty = false
 		return false
 
 	var mtime := FileAccess.get_modified_time(path)
@@ -32,53 +34,153 @@ func _load_material_index() -> bool:
 			push_error("Nexus Material: %s" % load_result.error)
 		_index_mtime = -1
 		_material_index = {}
+		_index_dirty = false
 		return false
 
 	_material_index = load_result.entries
 	_index_mtime = mtime
+	_index_dirty = false
 	return not _material_index.is_empty()
 
+func flush_index_if_dirty() -> void:
+	if not _index_dirty:
+		return
+	var path := NexusPaths.material_index_path()
+	if not NexusUtils.atomic_write_index_json(path, _material_index, "material_index.json"):
+		push_warning("Nexus Material: Failed to write material_index.json after .material conversion.")
+		return
+	_index_dirty = false
+	if FileAccess.file_exists(path):
+		_index_mtime = FileAccess.get_modified_time(path)
+
+func _mark_index_dirty() -> void:
+	_index_dirty = true
+
+func _delete_tres_file(path: String) -> void:
+	if path.is_empty() or not path.ends_with(".tres"):
+		return
+	if not FileAccess.file_exists(path):
+		return
+	var abs_path := ProjectSettings.globalize_path(path)
+	var err := DirAccess.remove_absolute(abs_path)
+	if err != OK:
+		push_warning("Nexus Material: Could not delete '%s' (%s)." % [path, error_string(err)])
+
+func _tres_to_material_path(path: String) -> String:
+	if path.ends_with(".tres"):
+		return path.get_basename() + ".material"
+	return path
+
+## When material_ext is MAT, convert text .tres to binary .material via ResourceSaver, then delete .tres.
+func _convert_to_material_if_needed(resource_path: String, mat_entry: Dictionary) -> String:
+	var mat_ext := str(mat_entry.get("material_ext", "TRES"))
+	if mat_ext != "MAT" or resource_path.is_empty():
+		return resource_path
+
+	if resource_path.ends_with(".material"):
+		if ResourceLoader.exists(resource_path) or FileAccess.file_exists(resource_path):
+			return resource_path
+		var sibling_tres := resource_path.get_basename() + ".tres"
+		if ResourceLoader.exists(sibling_tres) or FileAccess.file_exists(sibling_tres):
+			resource_path = sibling_tres
+		else:
+			return resource_path
+
+	var mat_path := _tres_to_material_path(resource_path)
+	var tres_exists := ResourceLoader.exists(resource_path) or FileAccess.file_exists(resource_path)
+	var mat_exists := ResourceLoader.exists(mat_path) or FileAccess.file_exists(mat_path)
+
+	if mat_exists:
+		var tres_mtime := 0
+		if FileAccess.file_exists(resource_path):
+			tres_mtime = FileAccess.get_modified_time(resource_path)
+		var mat_mtime := FileAccess.get_modified_time(mat_path)
+		if mat_mtime >= tres_mtime or not FileAccess.file_exists(resource_path):
+			if str(mat_entry.get("relative_path", "")).ends_with(".tres"):
+				mat_entry["relative_path"] = mat_path.replace("res://", "")
+				_mark_index_dirty()
+			if FileAccess.file_exists(resource_path) and resource_path.ends_with(".tres"):
+				_delete_tres_file(resource_path)
+			return mat_path
+
+	if not tres_exists:
+		return mat_path if mat_exists else resource_path
+
+	var main_mat = ResourceLoader.load(resource_path, "", ResourceLoader.CACHE_MODE_REPLACE)
+	if not is_instance_valid(main_mat):
+		push_warning("Nexus Material: Could not load '%s' for .material conversion." % resource_path)
+		return resource_path
+
+	var pass1_tres := ""
+	if main_mat is ShaderMaterial and main_mat.next_pass is ShaderMaterial:
+		pass1_tres = str(main_mat.next_pass.resource_path)
+		if not pass1_tres.is_empty() and pass1_tres.ends_with(".tres"):
+			var pass1_mat := pass1_tres.get_basename() + ".material"
+			var pass_err := ResourceSaver.save(main_mat.next_pass, pass1_mat)
+			if pass_err != OK:
+				push_warning(
+					"Nexus Material: Could not save pass material '%s' (%s)."
+					% [pass1_mat, error_string(pass_err)]
+				)
+
+	var save_err := ResourceSaver.save(main_mat, mat_path)
+	if save_err != OK:
+		push_warning("Nexus Material: Could not save '%s' (%s)." % [mat_path, error_string(save_err)])
+		return resource_path
+
+	_delete_tres_file(resource_path)
+	if not pass1_tres.is_empty():
+		_delete_tres_file(pass1_tres)
+
+	mat_entry["relative_path"] = mat_path.replace("res://", "")
+	_mark_index_dirty()
+	return mat_path
+
 func process(node: Node, stats: Dictionary) -> void:
-	if not node is MeshInstance3D or not is_instance_valid(node.mesh): return
-	if not _load_material_index(): return
+	if not node is MeshInstance3D or not is_instance_valid(node.mesh):
+		return
+	if not _load_material_index():
+		return
 
 	var mesh_was_duplicated = false
 	var swapped_count = 0
 
 	for i in range(node.mesh.get_surface_count()):
 		var current_material: Material = node.mesh.surface_get_material(i)
-		if not is_instance_valid(current_material): continue
-			
-		if current_material.has_meta("extras"):
-			var extras = current_material.get_meta("extras")
-			if extras.has("nexus_material_id"):
-				var mat_id = extras["nexus_material_id"]
-				var mat_entry = _material_index.get(mat_id, {})
-				if mat_entry is Dictionary:
-					var rel_path = mat_entry.get("relative_path", "")
-					if not rel_path.is_empty():
-						var tres_path = NexusUtils.validate_index_path(rel_path)
-						if not tres_path.is_empty() and ResourceLoader.exists(tres_path):
-							var external_material = ResourceLoader.load(tres_path, "", ResourceLoader.CACHE_MODE_REPLACE)
-							if is_instance_valid(external_material):
-								_check_shader_convert_version(external_material, mat_id)
-								if not mesh_was_duplicated:
-									node.mesh = node.mesh.duplicate()
-									mesh_was_duplicated = true
-								node.mesh.surface_set_material(i, external_material)
-								if external_material.get_meta("nexus_uses_vertex_color", false):
-									_ensure_mesh_vertex_colors(node)
-								swapped_count += 1
-	
+		if not is_instance_valid(current_material) or not current_material.has_meta("extras"):
+			continue
+		var extras = current_material.get_meta("extras")
+		if not extras is Dictionary or not extras.has(NexusSceneUtils.NEXUS_MATERIAL_ID_KEY):
+			continue
+		var mat_id = extras[NexusSceneUtils.NEXUS_MATERIAL_ID_KEY]
+		var mat_entry = _material_index.get(mat_id, {})
+		if not mat_entry is Dictionary:
+			continue
+		var rel_path = mat_entry.get("relative_path", "")
+		if rel_path.is_empty():
+			continue
+		var tres_path = NexusUtils.validate_index_path(rel_path)
+		tres_path = _convert_to_material_if_needed(tres_path, mat_entry)
+		if tres_path.is_empty() or not ResourceLoader.exists(tres_path):
+			continue
+		var external_material = ResourceLoader.load(tres_path, "", ResourceLoader.CACHE_MODE_REPLACE)
+		if not is_instance_valid(external_material):
+			continue
+		_check_shader_convert_version(external_material, mat_id)
+		if not mesh_was_duplicated:
+			node.mesh = node.mesh.duplicate()
+			mesh_was_duplicated = true
+		node.mesh.surface_set_material(i, external_material)
+		if external_material.get_meta("nexus_uses_vertex_color", false):
+			_ensure_mesh_vertex_colors(node)
+		swapped_count += 1
+
 	stats.materials += swapped_count
 
-## Reset per-import caches before walking a scene for GLB material externalization.
 func begin_externalize_pass() -> void:
 	_externalize_cache.clear()
 	_externalize_claimed_paths.clear()
 
-## Writes embedded glTF materials as .tres next to gltf_path and rebinds mesh surfaces.
-## Existing sidecar files are preserved (user edits survive reimport).
 func externalize_embedded(node: Node, gltf_path: String, stats: Dictionary) -> void:
 	if not node is MeshInstance3D or not is_instance_valid(node.mesh):
 		return

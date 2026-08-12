@@ -1,9 +1,7 @@
 @tool
 extends Object
 
-## Creates ResonanceGeometry from nexus_mesh_collision_shape. Saves mesh sidecars to .res and
-## optionally removes the glTF MeshInstance3D when discard_mesh is set. ResonanceGeometry nodes
-## are attached when building wrapper or inherited scenes from nexus_resonance_nodes metadata.
+## Saves mesh sidecars to .res and attaches ResonanceStaticGeometry / ResonanceDynamicGeometry.
 
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: Node, stats: Dictionary) -> bool:
 	var shape_type = node_meta.get("nexus_mesh_collision_shape", "")
@@ -76,7 +74,7 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 			rid_to_path[rid_key] = mesh_path
 			root.set_meta(RID_PATH_META, rid_to_path)
 
-	var transform_rel = _get_transform_relative_to_root(root, node)
+	var transform_rel = NexusTransformSanitize.transform_relative_to(root, node)
 	var transform_str = var_to_str(transform_rel)
 
 	if discard_mesh:
@@ -96,17 +94,6 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	if stats.has("resonance"):
 		stats.resonance += 1
 	return true
-
-
-## Computes node's transform relative to root by walking the parent chain.
-## Works during import when nodes may not be in the scene tree (is_inside_tree() false).
-func _get_transform_relative_to_root(root: Node, node: Node) -> Transform3D:
-	var t = node.transform
-	var p = node.get_parent()
-	while p and p != root:
-		t = p.transform * t
-		p = p.get_parent()
-	return t
 
 
 ## Up to 8 hex chars from RID for stable sidecar names when the base filename collides (different meshes).

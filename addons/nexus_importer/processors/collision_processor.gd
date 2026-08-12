@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Creates CollisionShape3D from nexus_collision_dims or nexus_mesh_collision_shape.
-
 const RootProcessor = preload("res://addons/nexus_importer/processors/root_processor.gd")
 const COLLISION_SHAPES_DIR := "collisionshapes"
 
@@ -111,11 +109,15 @@ func _build_collision_shape_node(
 	var safe_node_transform := NexusTransformSanitize.sanitize(node3d.transform, node3d.name)
 	var immediate_parent := node3d.get_parent()
 	if immediate_parent != null and collision_parent != immediate_parent:
-		var safe_global := NexusTransformSanitize.sanitize(_composed_global_transform(node3d), node3d.name)
+		var safe_global := NexusTransformSanitize.sanitize(
+			NexusTransformSanitize.composed_global_transform(node3d), node3d.name
+		)
 		var target_global: Transform3D = safe_global * offset_transform
 		if collision_parent is Node3D:
 			var parent_3d := collision_parent as Node3D
-			var safe_parent_global := NexusTransformSanitize.sanitize(_composed_global_transform(parent_3d), parent_3d.name)
+			var safe_parent_global := NexusTransformSanitize.sanitize(
+				NexusTransformSanitize.composed_global_transform(parent_3d), parent_3d.name
+			)
 			col_shape_node.transform = safe_parent_global.affine_inverse() * target_global
 		else:
 			col_shape_node.transform = safe_node_transform * offset_transform
@@ -232,20 +234,3 @@ func _create_mesh_shape(mesh: Mesh, shape_type: String, offset: Vector3) -> Shap
 			trimesh.set_faces(f)
 		return trimesh
 	return null
-
-# World transform from the local chain so it works on nodes that are not yet
-# added to the SceneTree (Godot 4.7 returns IDENTITY for off-tree global_transform).
-func _composed_global_transform(node_3d: Node3D) -> Transform3D:
-	if node_3d.is_inside_tree():
-		return node_3d.global_transform
-
-	var chain: Array[Node3D] = []
-	var current: Node = node_3d
-	while current is Node3D:
-		chain.push_front(current as Node3D)
-		current = current.get_parent()
-
-	var result := Transform3D.IDENTITY
-	for node in chain:
-		result = result * node.transform
-	return result

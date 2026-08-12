@@ -31,6 +31,64 @@ static func sanitize_scene_transforms(root: Node) -> int:
 	return _sanitize_transforms_recursive(root)
 
 
+# Godot 4.7 returns IDENTITY for off-tree global_transform; compose the local chain.
+static func composed_global_transform(node_3d: Node3D) -> Transform3D:
+	if node_3d == null:
+		return Transform3D.IDENTITY
+	if node_3d.is_inside_tree():
+		return node_3d.global_transform
+
+	var chain: Array[Node3D] = []
+	var current: Node = node_3d
+	while current is Node3D:
+		chain.push_front(current as Node3D)
+		current = current.get_parent()
+
+	var result := Transform3D.IDENTITY
+	for node in chain:
+		result = result * node.transform
+	return result
+
+
+## Node transform in root's local space (root.transform not applied).
+static func transform_relative_to(root: Node, node: Node) -> Transform3D:
+	if node == null or root == null or node == root:
+		return Transform3D.IDENTITY
+	if not node is Node3D:
+		return Transform3D.IDENTITY
+	if root is Node3D and node.is_inside_tree() and (root as Node3D).is_inside_tree():
+		return (root as Node3D).global_transform.affine_inverse() * (node as Node3D).global_transform
+
+	var t := (node as Node3D).transform
+	var p: Node = node.get_parent()
+	while p and p != root:
+		if p is Node3D:
+			t = (p as Node3D).transform * t
+		p = p.get_parent()
+	return t
+
+
+## Accumulated transform from root down to node (includes root.transform).
+static func accumulated_transform(node: Node, root: Node) -> Transform3D:
+	if node == null:
+		return Transform3D.IDENTITY
+	var path: Array[Node] = []
+	var n: Node = node
+	while is_instance_valid(n):
+		path.append(n)
+		if n == root:
+			break
+		n = n.get_parent()
+	if path.is_empty():
+		return Transform3D.IDENTITY
+	path.reverse()
+	var t := Transform3D.IDENTITY
+	for nd in path:
+		if nd is Node3D:
+			t = t * (nd as Node3D).transform
+	return t
+
+
 static func _sanitize_transforms_recursive(node: Node) -> int:
 	var fixed := 0
 	if node is Node3D:

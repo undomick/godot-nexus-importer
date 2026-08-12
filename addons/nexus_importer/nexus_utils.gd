@@ -8,6 +8,7 @@ extends RefCounted
 const NEXUS_ASSET_META_KEY = "NEXUS_ASSET_METADATA"
 
 static var _gltf_json_cache: Dictionary = {}
+static var _warned_backslash_index_path: bool = false
 
 ## Magic and chunk type for binary glTF (.glb), little-endian.
 const _GLB_MAGIC = 0x46546C67
@@ -357,14 +358,21 @@ static func atomic_write_index_json(path: String, data: Dictionary, label: Strin
 
 ## Validates a project-relative resource path (index entries or glTF metadata).
 ## Returns the full res:// path if safe, empty string otherwise.
-## Rejects: paths with "..", absolute system paths, and backslashes.
+## Rejects: paths with "..", absolute system paths. Backslashes are normalized.
 static func validate_index_path(rel_path: String) -> String:
 	if rel_path.is_empty():
 		return ""
 	var path = rel_path.strip_edges()
 	if path.begins_with("res://"):
 		path = path.substr(6)
-	if path.contains("..") or path.begins_with("/") or path.contains("\\"):
+	if path.contains("\\"):
+		if not _warned_backslash_index_path:
+			_warned_backslash_index_path = true
+			push_warning(
+				"Nexus: Index paths with backslashes are normalized to forward slashes."
+			)
+		path = path.replace("\\", "/")
+	if path.contains("..") or path.begins_with("/"):
 		return ""
 	if path.is_empty():
 		return ""

@@ -1,9 +1,6 @@
 @tool
 extends Object
 
-## Logs UV layer name to glTF channel mapping from nexus_uv_layers metadata.
-
-
 func process(node: Node, meta: Dictionary) -> void:
 	if not node is MeshInstance3D:
 		return

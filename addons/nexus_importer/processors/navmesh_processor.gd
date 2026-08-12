@@ -1,8 +1,6 @@
 @tool
 extends Object
 
-## Bakes NavigationMesh from mesh geometry for assets with NAVMESH root type.
-
 func process(scene_root: Node, scene_meta: Dictionary) -> void:
 	if scene_meta.get("root_type") != "NAVMESH":
 		return
