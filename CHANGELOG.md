@@ -2,6 +2,24 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
+
+## [2.1.0] - 2026-08-12
+
+### Blender Addon (nexus_b2g)
+
+- UCUPaint Normal Maps with `uv_map` set export when the Image Texture already uses the same UV; mismatched UV names fall back to texture baking.
+- Texture and index paths are normalized so Linux exports place files correctly.
+- Next-to-asset texture layout keeps source subfolders (no more overwrites when two textures share a filename); shared materials use dedicated texture folders under Best Guess.
+- Project Paths: added Material Extension option (`.tres` / `.material`, default `.tres`).
+- `material_ext` is written into `material_index.json` per material; Blender always exports text `.tres`.
+- glTF `gather_material_hook` no longer crashes on Blender 5.2 `InlineShaderNodes`.
+
+### Godot Addon (nexus_importer)
+
+- Closing multiple Nexus asset tabs during batch export/reimport is safer on Godot 4.7+ (one tab per frame / re-check open scenes).
+- Legacy `asset_index` / `material_index` entries with backslashes are normalized instead of rejected.
+- When `material_ext` is `MAT`, the importer converts `.tres` to binary `.material` via `ResourceSaver`, deletes `.tres`, and updates the index.
+
 ## [2.0.1] - 2026-07-21
 
 ### Blender Addon (nexus_b2g)
