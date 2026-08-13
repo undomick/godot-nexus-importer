@@ -13,7 +13,7 @@ func process(node: Node3D, meta: Dictionary, root: Node) -> bool:
 		)
 		return false
 
-	var skeleton = _find_skeleton_in_scene(root)
+	var skeleton = _find_skeleton_for_node(node, root, meta)
 	if not skeleton:
 		push_warning(
 			"Nexus Attacher: Could not find a Skeleton3D node in the scene for node '%s'."
@@ -77,12 +77,15 @@ func _resolve_bone_offset(
 	# actual world transform and the bone rest. This is frame-agnostic: the exporter
 	# only provides the node's world TRS (via the glTF node) and the bone name, so no
 	# B2G/conversion assumptions are baked in. node.world = skel_world @ bone_rest @ offset.
-	var node_world := _get_node_world_transform(node, root, meta)
-	var skel_world := (
+	var node_world := NexusTransformSanitize.sanitize(
+		_get_node_world_transform(node, root, meta), str(node.name)
+	)
+	var raw_skel := (
 		skeleton.global_transform
 		if skeleton.is_inside_tree()
 		else NexusTransformSanitize.accumulated_transform(skeleton, root)
 	)
+	var skel_world := NexusTransformSanitize.sanitize(raw_skel, str(skeleton.name))
 	var empty_skel := skel_world.affine_inverse() * node_world
 	var bone_rest := skeleton.get_bone_global_rest(bone_idx)
 	return bone_rest.affine_inverse() * empty_skel
@@ -106,7 +109,6 @@ func _ensure_bone_target(
 	parent: Node
 ) -> void:
 	if parent is ModifierBoneTarget3D and _is_skeleton_child(parent, skeleton):
-		parent.name = node.name + "_Attachment"
 		parent.set_bone_name(godot_bone_name)
 		parent.transform = Transform3D.IDENTITY
 		parent.owner = root
@@ -208,6 +210,36 @@ func _get_float(arr: Array, i: int) -> float:
 
 func _is_skeleton_child(node: Node, skeleton: Skeleton3D) -> bool:
 	return node.get_parent() == skeleton
+
+
+func _find_skeleton_for_node(node: Node, root: Node, meta: Dictionary) -> Skeleton3D:
+	var attach = meta.get("nexus_bone_attachment", {})
+	var named := ""
+	if attach is Dictionary:
+		named = str(attach.get("skeleton_name", "")).strip_edges()
+	if not named.is_empty():
+		var by_name := _find_named_skeleton(root, named)
+		if by_name:
+			return by_name
+	var current: Node = node.get_parent()
+	while current:
+		if current is Skeleton3D:
+			return current
+		for child in current.get_children():
+			if child is Skeleton3D:
+				return child
+		current = current.get_parent()
+	return _find_skeleton_in_scene(root)
+
+
+func _find_named_skeleton(root: Node, skeleton_name: String) -> Skeleton3D:
+	if root is Skeleton3D and root.name == skeleton_name:
+		return root
+	for child in root.get_children():
+		var found := _find_named_skeleton(child, skeleton_name)
+		if is_instance_valid(found):
+			return found
+	return null
 
 
 func _find_skeleton_in_scene(root: Node) -> Skeleton3D:

@@ -199,7 +199,7 @@ func _externalize_separation_ray_shape(shape: Shape3D, root: Node, node_name: St
 		return shape
 
 	var shapes_dir := gltf_path.get_base_dir().path_join(COLLISION_SHAPES_DIR)
-	var dir_err := DirAccess.make_dir_recursive_absolute(shapes_dir)
+	var dir_err := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(shapes_dir))
 	if dir_err != OK and dir_err != ERR_ALREADY_EXISTS:
 		push_warning("Nexus Collision: Could not create shape folder '%s'." % shapes_dir)
 		return shape

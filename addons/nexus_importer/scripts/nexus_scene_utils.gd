@@ -469,11 +469,13 @@ static func _strip_scene_style_suffix(stem: String) -> String:
 
 # Canonical key (dir + stem without scene-style suffix, no extension) so a glTF and
 # its derived *_inherited.tscn / *_wrapper.tscn resolve to the same identity.
+# Slash-normalized and case-folded; do not use as a FileAccess path.
 static func gltf_identity_key(path: String) -> String:
 	if path.is_empty():
 		return ""
-	var stem := _strip_scene_style_suffix(path.get_file().get_basename())
-	return path.get_base_dir().path_join(stem)
+	var canonical := NexusUtils.canonical_res_path(path)
+	var stem := _strip_scene_style_suffix(canonical.get_file().get_basename())
+	return canonical.get_base_dir().path_join(stem).to_lower()
 
 
 static func is_self_reference(requested_path: String, own_gltf_path: String) -> bool:
@@ -558,17 +560,14 @@ static func are_dependency_scenes_ready(gltf_paths: Array) -> bool:
 static func dependency_scene_ready(gltf_path: String) -> bool:
 	if gltf_path.is_empty():
 		return true
-	var scene_path := resolve_packed_scene_path(gltf_path)
-	if scene_path.is_empty():
+	if not NexusUtils.is_gltf_container_path(gltf_path):
+		return FileAccess.file_exists(gltf_path) or ResourceLoader.exists(gltf_path)
+	if not FileAccess.file_exists(gltf_path) and not ResourceLoader.exists(gltf_path):
 		return false
-	if not ResourceLoader.exists(scene_path):
+	var import_path := gltf_path + ".import"
+	if not FileAccess.file_exists(import_path):
 		return false
-	if NexusUtils.is_gltf_container_path(gltf_path):
-		var import_path := gltf_path + ".import"
-		if not FileAccess.file_exists(import_path):
-			return false
-		return FileAccess.get_modified_time(gltf_path) <= FileAccess.get_modified_time(import_path)
-	return FileAccess.file_exists(scene_path)
+	return FileAccess.get_modified_time(gltf_path) <= FileAccess.get_modified_time(import_path)
 
 
 static func collect_composition_dependency_asset_ids(gltf_path: String) -> Array[String]:
@@ -971,7 +970,7 @@ static func discover_unindexed_composition_gltfs(asset_index: Dictionary) -> Arr
 			continue
 		var indexed_path := NexusUtils.validate_index_path(str(entry.get("relative_path", "")))
 		if not indexed_path.is_empty():
-			indexed_paths[indexed_path] = true
+			indexed_paths[NexusUtils.path_identity_key(indexed_path)] = true
 
 	var discovered: Array[String] = []
 	var game_root := ProjectSettings.globalize_path("res://")
@@ -982,7 +981,7 @@ static func discover_unindexed_composition_gltfs(asset_index: Dictionary) -> Arr
 		var res_path := NexusUtils.to_res_gltf_path(gltf_path)
 		if res_path.is_empty():
 			continue
-		if indexed_paths.has(res_path):
+		if indexed_paths.has(NexusUtils.path_identity_key(res_path)):
 			continue
 		if not is_deferred_wave_gltf(res_path):
 			continue

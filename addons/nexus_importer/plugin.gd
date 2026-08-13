@@ -140,6 +140,7 @@ func _process(_delta):
 
 	if _reimport_manager.cooldown_remaining > 0:
 		_reimport_manager.cooldown_remaining -= 1
+		_reimport_manager.tick_deferred_retries()
 		return
 
 	if _multimesh_scan_cooldown_frames > 0:
@@ -148,6 +149,8 @@ func _process(_delta):
 	if fs.is_scanning():
 		_reimport_manager.cooldown_remaining = 3
 		return
+
+	_reimport_manager.tick_deferred_retries()
 
 	if _wrapper_builder.has_pending() or _wrapper_builder.is_busy():
 		if _wrapper_builder.tick_scene_creation(_reimport_manager):
@@ -399,11 +402,14 @@ func _on_resources_reimporting(_resources: PackedStringArray):
 		NexusImportContextScript.set_mass_import_active(false)
 		_reimport_manager.on_resources_reimporting(_resources)
 		return
-	if _reimport_manager.is_composition_wave_active():
-		return
-	if _reimport_manager.is_multimesh_wave_active():
-		return
-	if NexusImportContextScript.is_multimesh_wave_active():
+	if (
+		_reimport_manager.is_composition_wave_active()
+		or _reimport_manager.is_multimesh_wave_active()
+		or NexusImportContextScript.is_multimesh_wave_active()
+	):
+		# Mark in-progress for this reimport_files call only. Wave-hold flags
+		# must not stay in is_reimport_active() or packed-scene creation stalls.
+		_reimport_manager.on_resources_reimporting(_resources)
 		return
 	if _resources_include_multimesh_manifest(_resources):
 		NexusImportContextScript.set_mass_import_active(false)

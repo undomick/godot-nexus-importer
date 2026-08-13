@@ -34,11 +34,16 @@ static func is_active() -> bool:
 static func defer_path(path: String) -> void:
 	if path.is_empty():
 		return
+	path = NexusUtils.canonical_res_path(path)
+	if path.is_empty():
+		return
 	var ext := path.get_extension().to_lower()
 	if ext in ["png", "jpg", "jpeg", "webp"]:
-		_deferred_texture_paths[path] = true
+		var key := NexusUtils.dict_bind_path(_deferred_texture_paths, path)
+		_deferred_texture_paths[key] = true
 	elif ext in ["gltf", "glb"]:
-		_deferred_gltf_paths[path] = true
+		var key := NexusUtils.dict_bind_path(_deferred_gltf_paths, path)
+		_deferred_gltf_paths[key] = true
 
 
 static func defer_paths(paths: Array) -> void:
@@ -103,7 +108,7 @@ static func _pid_alive(pid: int) -> bool:
 			])
 			var exit_code := OS.execute("tasklist", args, output, true)
 			if exit_code != 0:
-				return true
+				return false
 			return output.size() > 0 and str(output[0]).find(str(pid)) >= 0
 		_:
 			return OS.execute("kill", ["-0", str(pid)]) == 0

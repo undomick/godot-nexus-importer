@@ -111,7 +111,8 @@ static func index_entries_by_gltf_path(asset_index: Dictionary) -> Dictionary:
 		var gltf_path := NexusUtils.validate_index_path(rel_path)
 		if gltf_path.is_empty():
 			continue
-		result[gltf_path] = entry
+		var key := NexusUtils.dict_bind_path(result, gltf_path)
+		result[key] = entry
 	return result
 
 func _discover_nexus_gltf_paths() -> Array[String]:
@@ -182,7 +183,7 @@ func _salvage_sidecar_fields(config: ConfigFile, import_path: String) -> void:
 		return
 	var section := ""
 	for line_raw in text.split("\n", false):
-		var line = line_raw.strip_edges()
+		var line = line_raw.replace("\r", "").strip_edges()
 		if line.is_empty() or line.begins_with("#"):
 			continue
 		if line.begins_with("[") and line.ends_with("]"):

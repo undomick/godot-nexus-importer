@@ -93,7 +93,7 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	root.set_meta("nexus_resonance_nodes", nodes_array)
 	if stats.has("resonance"):
 		stats.resonance += 1
-	return true
+	return discard_mesh
 
 
 ## Up to 8 hex chars from RID for stable sidecar names when the base filename collides (different meshes).

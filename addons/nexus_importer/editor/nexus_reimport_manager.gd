@@ -34,7 +34,9 @@ var _batch_reimport_active: bool = false
 var _active_batch_paths: Dictionary = {}
 var _config_deferred_queue: Array[String] = []
 var _config_deferred_scheduled: bool = false
+var _config_deferred_retry_pending: bool = false
 var _flush_pending_scheduled: bool = false
+var _flush_pending_retry_pending: bool = false
 var _flush_pending_just_reimported: Array = []
 var _flush_fallback_timer_active: bool = false
 var _deferred_config_paths: Array[String] = []
@@ -61,12 +63,16 @@ func _init(plugin: EditorPlugin) -> void:
 	)
 
 func is_reimport_active() -> bool:
+	# Only reimport_files in flight. Composition/MultiMesh wave flags can stay
+	# set while later waves are held; packed-scene creation must still run in
+	# those gaps (assets/skeletals before combined/level/multimesh scenes).
 	return _reimport_pending or _reimport_in_progress or _batch_reimport_active
 
 func was_recently_reimported(gltf_path: String) -> bool:
-	if gltf_path.is_empty() or not _recently_reimported_ms.has(gltf_path):
+	var key := NexusUtils.dict_find_path_key(_recently_reimported_ms, gltf_path)
+	if key.is_empty():
 		return false
-	return Time.get_ticks_msec() - int(_recently_reimported_ms[gltf_path]) < RECENTLY_REIMPORTED_GRACE_MS
+	return Time.get_ticks_msec() - int(_recently_reimported_ms[key]) < RECENTLY_REIMPORTED_GRACE_MS
 
 func note_resources_reimported(
 	resources: PackedStringArray, wrapper_builder: NexusWrapperBuilder = null
@@ -84,13 +90,19 @@ func note_resources_reimported(
 		var ext := path.get_extension().to_lower()
 		if ext != "gltf" and ext != "glb":
 			continue
-		_recently_reimported_ms[path] = now
-		if _config_pending_reimport_paths.erase(path):
-			_config_stabilized_paths[path] = true
-		var canonical := NexusUtils.to_res_gltf_path(path)
+		var canonical := NexusUtils.canonical_res_path(path)
 		if canonical.is_empty():
 			canonical = path
-		var index_entry: Dictionary = gltf_to_index_entry.get(canonical, {})
+		var recent_key := NexusUtils.dict_bind_path(_recently_reimported_ms, canonical)
+		_recently_reimported_ms[recent_key] = now
+		var pending_key := NexusUtils.dict_find_path_key(_config_pending_reimport_paths, canonical)
+		if not pending_key.is_empty() and _config_pending_reimport_paths.erase(pending_key):
+			var stab_key := NexusUtils.dict_bind_path(_config_stabilized_paths, canonical)
+			_config_stabilized_paths[stab_key] = true
+		var index_key := NexusUtils.dict_find_path_key(gltf_to_index_entry, canonical)
+		var index_entry: Dictionary = (
+			gltf_to_index_entry[index_key] if not index_key.is_empty() else {}
+		)
 		var index_hash := str(index_entry.get("content_hash", "")).strip_edges()
 		NexusImportState.mark_imported(canonical, index_hash)
 		NexusSceneCompleteness.invalidate(canonical)
@@ -109,23 +121,29 @@ func is_config_fix_needed(gltf_path: String) -> bool:
 	return _should_defer_config_fix(gltf_path)
 
 func _should_defer_config_fix(gltf_path: String) -> bool:
-	if _config_stabilized_paths.has(gltf_path):
+	var stab_key := NexusUtils.dict_find_path_key(_config_stabilized_paths, gltf_path)
+	if not stab_key.is_empty():
 		if NexusSceneUtils.nexus_import_config_needs_fix(gltf_path):
 			# Stabilized sidecar drifted back to defaults; invalidate and re-fix.
-			_config_stabilized_paths.erase(gltf_path)
+			_config_stabilized_paths.erase(stab_key)
 			return true
 		return false
 	return NexusSceneUtils.nexus_import_config_needs_fix(gltf_path)
 
 func _mark_config_pending_reimport(gltf_path: String) -> void:
-	_config_pending_reimport_paths[gltf_path] = true
+	var key := NexusUtils.dict_bind_path(_config_pending_reimport_paths, gltf_path)
+	_config_pending_reimport_paths[key] = true
 
 func is_config_wave_pending() -> bool:
 	return not _config_deferred_queue.is_empty() or not _pending_reimport_after_signal.is_empty()
 
 func is_blocking_scene_creation() -> bool:
+	# Wave-hold is not a blocker: asset wrappers are built while combined /
+	# level / multimesh glTFs wait in later waves.
 	if is_reimport_active() or is_config_wave_pending() or _batch_reimport_active:
 		return true
+	if _plugin == null or not is_instance_valid(_plugin):
+		return false
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
 	if fs.is_scanning():
 		return true
@@ -953,6 +971,8 @@ func queue_dependent_gltfs_from_index() -> int:
 	var pending_paths: Array[String] = []
 	for asset_id in asset_index.keys():
 		var entry = asset_index[asset_id]
+		if not entry is Dictionary:
+			continue
 		var rel_path: String = entry.get("relative_path", "")
 		if rel_path.is_empty():
 			continue
@@ -999,10 +1019,14 @@ func _schedule_deferred_config_writes() -> void:
 	_plugin.call_deferred("_nexus_apply_deferred_config_writes")
 
 
-func _schedule_flush_pending_reimport(just_reimported: Array) -> void:
+func _retain_flush_pending_paths(just_reimported: Array) -> void:
 	for path in just_reimported:
 		if path not in _flush_pending_just_reimported:
 			_flush_pending_just_reimported.append(path)
+
+
+func _schedule_flush_pending_reimport(just_reimported: Array) -> void:
+	_retain_flush_pending_paths(just_reimported)
 	if _flush_pending_scheduled:
 		return
 	if _plugin == null or not is_instance_valid(_plugin):
@@ -1024,19 +1048,30 @@ func _arm_flush_fallback_timer() -> void:
 	timer.timeout.connect(_on_flush_fallback_timeout)
 
 
+func tick_deferred_retries() -> void:
+	if _config_deferred_retry_pending and not _config_deferred_scheduled:
+		apply_deferred_config_writes()
+	if _flush_pending_retry_pending and not _flush_pending_scheduled:
+		flush_pending_reimport_queue([])
+
+
 func apply_deferred_config_writes() -> void:
 	_config_deferred_scheduled = false
 	if NexusBatchLock.is_active():
-		_schedule_deferred_config_writes()
+		# Do not call_deferred here: MessageQueue.flush() would spin until OOM.
+		_config_deferred_retry_pending = true
 		return
 	if _config_deferred_queue.is_empty():
+		_config_deferred_retry_pending = false
 		return
 	if _plugin == null or not is_instance_valid(_plugin):
+		_config_deferred_retry_pending = false
 		return
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
 	if fs.is_scanning() or _reimport_in_progress or _batch_reimport_active:
-		_schedule_deferred_config_writes()
+		_config_deferred_retry_pending = true
 		return
+	_config_deferred_retry_pending = false
 	var paths = _config_deferred_queue.duplicate()
 	_config_deferred_queue.clear()
 	for path in paths:
@@ -1057,16 +1092,21 @@ func flush_pending_reimport_queue(just_reimported: Array) -> void:
 			merged.append(path)
 	_flush_pending_just_reimported.clear()
 	if _pending_reimport_after_signal.is_empty():
+		_flush_pending_retry_pending = false
 		return
 	if _reimport_in_progress or _batch_reimport_active:
-		_schedule_flush_pending_reimport(merged)
+		_retain_flush_pending_paths(merged)
+		_flush_pending_retry_pending = true
 		return
 	if _plugin == null or not is_instance_valid(_plugin):
+		_flush_pending_retry_pending = false
 		return
 	var fs = _plugin.get_editor_interface().get_resource_filesystem()
 	if fs.is_scanning():
-		_schedule_flush_pending_reimport(merged)
+		_retain_flush_pending_paths(merged)
+		_flush_pending_retry_pending = true
 		return
+	_flush_pending_retry_pending = false
 	var reimported_set: Dictionary = {}
 	for path in merged:
 		reimported_set[path] = true

@@ -31,6 +31,21 @@ static func sanitize_scene_transforms(root: Node) -> int:
 	return _sanitize_transforms_recursive(root)
 
 
+static func sanitize_animation_tracks(anim: Animation) -> int:
+	if anim == null:
+		return 0
+	var fixed := 0
+	for i in range(anim.get_track_count()):
+		var type := anim.track_get_type(i)
+		for k in range(anim.track_get_key_count(i)):
+			var value = anim.track_get_key_value(i, k)
+			var sanitized = _sanitize_track_key(type, value)
+			if sanitized != value:
+				anim.track_set_key_value(i, k, sanitized)
+				fixed += 1
+	return fixed
+
+
 # Godot 4.7 returns IDENTITY for off-tree global_transform; compose the local chain.
 static func composed_global_transform(node_3d: Node3D) -> Transform3D:
 	if node_3d == null:
@@ -119,3 +134,16 @@ static func _basis_is_finite(basis: Basis) -> bool:
 		if not col.is_finite():
 			return false
 	return true
+
+
+static func _sanitize_track_key(type: int, value: Variant) -> Variant:
+	if type == Animation.TYPE_POSITION_3D:
+		if value is Vector3 and not (value as Vector3).is_finite():
+			return Vector3.ZERO
+	elif type == Animation.TYPE_ROTATION_3D:
+		if value is Quaternion and not (value as Quaternion).is_finite():
+			return Quaternion.IDENTITY
+	elif type == Animation.TYPE_SCALE_3D:
+		if value is Vector3 and not (value as Vector3).is_finite():
+			return Vector3.ONE
+	return value

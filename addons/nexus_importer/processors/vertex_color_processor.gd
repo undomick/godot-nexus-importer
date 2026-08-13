@@ -12,6 +12,8 @@ func process(node: Node, meta: Dictionary) -> void:
 	var mesh_was_duplicated = false
 
 	for settings in attribute_settings:
+		if not settings is Dictionary:
+			continue
 		var mapping = settings.get("mapping")
 		var blender_name = settings.get("blender_name", "Unknown")
 		var channel_index = settings.get("gltf_channel_index", -1) # 0 = COLOR_0

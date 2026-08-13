@@ -27,6 +27,8 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 	var total_instances := 0
 	var total_layers := 0
 	var generate_collisions: bool = manifest.get("generate_collisions", false)
+	var collision_layer := int(scene_meta.get("collision_layer", 1))
+	var collision_mask := int(scene_meta.get("collision_mask", collision_layer))
 	var source_errors: PackedStringArray = []
 
 	for source_entry in sources:
@@ -35,7 +37,9 @@ func process(gltf_path: String, scene_meta: Dictionary) -> Node:
 		var build_result := _build_source_multimesh_tree(
 			gltf_path,
 			source_entry,
-			generate_collisions
+			generate_collisions,
+			collision_layer,
+			collision_mask
 		)
 		var source_root: Node = build_result.get("root")
 		if source_root == null:
@@ -123,7 +127,9 @@ func _read_manifest(scene_meta: Dictionary) -> Dictionary:
 func _build_source_multimesh_tree(
 	gltf_path: String,
 	source_entry: Dictionary,
-	generate_collisions: bool
+	generate_collisions: bool,
+	collision_layer: int = 1,
+	collision_mask: int = 1
 ) -> Dictionary:
 	if NexusImportContext.should_defer_external_scene_loads():
 		return {"error": "Source Deferred"}
@@ -202,7 +208,9 @@ func _build_source_multimesh_tree(
 			root_mmi,
 			layer_result["temp_instance"],
 			true,
-			source_scene_path
+			source_scene_path,
+			collision_layer,
+			collision_mask
 		)
 
 	var instance_count := 0
@@ -369,22 +377,32 @@ func _build_multimesh_resource(
 	var multimesh_res := MultiMesh.new()
 	multimesh_res.transform_format = MultiMesh.TRANSFORM_3D
 	multimesh_res.use_custom_data = false
-	multimesh_res.use_colors = has_colors
 	var clean_mesh := NexusMeshSanitize.sanitize_mesh(source_mesh, source_name)
 	multimesh_res.mesh = clean_mesh.duplicate() if clean_mesh else null
 	if multimesh_res.mesh == null:
 		push_error("Nexus MultiMesh: Source mesh is missing for '%s'." % source_name)
 		return {}
-	multimesh_res.instance_count = transforms.size()
 
+	var valid_transforms: Array[Transform3D] = []
+	var valid_colors: Array[Color] = []
 	for i in range(transforms.size()):
 		var instance_transform := _manifest_transform_to_transform3d(transforms[i], i)
 		if instance_transform == null:
 			continue
-		multimesh_res.set_instance_transform(i, instance_transform)
+		valid_transforms.append(instance_transform)
 		if has_colors:
-			var c = colors[i]
-			multimesh_res.set_instance_color(i, Color(c[0], c[1], c[2], c[3]))
+			valid_colors.append(_manifest_color_at(colors, i))
+
+	if valid_transforms.is_empty():
+		push_error("Nexus MultiMesh: No valid instance transforms for '%s'." % source_name)
+		return {}
+
+	multimesh_res.use_colors = has_colors
+	multimesh_res.instance_count = valid_transforms.size()
+	for i in range(valid_transforms.size()):
+		multimesh_res.set_instance_transform(i, valid_transforms[i])
+		if has_colors:
+			multimesh_res.set_instance_color(i, valid_colors[i])
 
 	# Embed a path-less copy in the imported scene; persist a separate duplicate as sidecar.
 	var embedded := multimesh_res.duplicate(true)
@@ -392,7 +410,7 @@ func _build_multimesh_resource(
 	var sidecar := multimesh_res.duplicate(true)
 
 	var res_dir := res_path.get_base_dir()
-	var dir_err := DirAccess.make_dir_recursive_absolute(res_dir)
+	var dir_err := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(res_dir))
 	if dir_err != OK and dir_err != ERR_ALREADY_EXISTS:
 		push_error("Nexus MultiMesh: Could not create folder for '%s'." % res_filename)
 		return {}
@@ -449,6 +467,24 @@ func _manifest_transform_to_transform3d(t_data: Variant, index: int) -> Variant:
 		return null
 	return Transform3D(basis, loc)
 
+func _manifest_color_at(colors: Variant, index: int) -> Color:
+	if colors == null or index < 0 or index >= colors.size():
+		push_warning("Nexus MultiMesh: Color entry %d is missing - using white." % index)
+		return Color.WHITE
+	var c = colors[index]
+	if c is Color:
+		return c
+	if not (c is Array or c is PackedFloat32Array or c is PackedFloat64Array):
+		push_warning("Nexus MultiMesh: Color entry %d has invalid type - using white." % index)
+		return Color.WHITE
+	if c.size() < 3:
+		push_warning("Nexus MultiMesh: Color entry %d has fewer than 3 channels - using white." % index)
+		return Color.WHITE
+	var alpha := 1.0
+	if c.size() > 3:
+		alpha = float(c[3])
+	return Color(float(c[0]), float(c[1]), float(c[2]), alpha)
+
 func _create_multimesh_instance(
 	source_name: String,
 	multimesh_res: MultiMesh,
@@ -466,7 +502,9 @@ func _attach_collision_script(
 	mmi_node: MultiMeshInstance3D,
 	source_instance: Node,
 	generate_col: bool,
-	source_scene_path: String
+	source_scene_path: String,
+	collision_layer: int = 1,
+	collision_mask: int = 1
 ) -> void:
 	if not generate_col:
 		return
@@ -492,8 +530,10 @@ func _attach_collision_script(
 	if not ResourceLoader.exists(script_path):
 		return
 	mmi_node.set_script(load(script_path))
-	mmi_node.collision_shapes = found_shapes
-	mmi_node.shape_transforms = found_transforms
+	mmi_node.set("collision_shapes", found_shapes)
+	mmi_node.set("shape_transforms", found_transforms)
+	mmi_node.set("collision_layer", collision_layer)
+	mmi_node.set("collision_mask", collision_mask)
 	print_verbose(" -> SUCCESS: Attached runtime script with %d shapes." % found_shapes.size())
 
 func _free_temp_instance(layer_result: Dictionary) -> void:

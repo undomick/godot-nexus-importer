@@ -4,6 +4,9 @@ extends Object
 func process(node: Node, node_meta: Dictionary, parent: Node) -> bool:
 	if not node_meta.has("nexus_curve"):
 		return false
+	if not node is Node3D:
+		push_warning("Nexus Path: Node '%s' is not a Node3D - skipped." % node.name)
+		return false
 
 	var curve_data = node_meta["nexus_curve"]
 	var points_array = curve_data.get("points", [])
@@ -21,6 +24,10 @@ func process(node: Node, node_meta: Dictionary, parent: Node) -> bool:
 	path_node.name = node.name
 	path_node.transform = node.transform
 	path_node.curve = _build_curve_from_points(points_array, is_cyclic)
+	if path_node.curve == null or path_node.curve.point_count < 2:
+		push_warning("Nexus Path: Curve '%s' has fewer than 2 valid points - skipped." % node.name)
+		path_node.free()
+		return false
 	path_node.set_meta("nexus_cyclic", is_cyclic)
 
 	var owner = node.owner
@@ -35,6 +42,9 @@ func _build_curve_from_points(points_array: Array, is_cyclic: bool) -> Curve3D:
 	curve.bake_interval = 0.1
 
 	for p_data in points_array:
+		if not p_data is Array:
+			push_warning("Nexus Path: Curve point is not an array - skipped.")
+			continue
 		_add_curve_point(curve, p_data)
 
 	if is_cyclic and points_array.size() > 0:
@@ -57,6 +67,10 @@ func _add_curve_point(curve: Curve3D, p_data: Array) -> bool:
 
 
 func _close_curve_if_needed(curve: Curve3D, points_array: Array) -> void:
+	if points_array.is_empty():
+		return
+	if not points_array[0] is Array or not points_array[points_array.size() - 1] is Array:
+		return
 	if points_array[0].size() < 3 or points_array[points_array.size() - 1].size() < 3:
 		return
 	var p_start = Vector3(points_array[0][0], points_array[0][1], points_array[0][2])

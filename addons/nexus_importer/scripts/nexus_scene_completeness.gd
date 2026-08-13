@@ -13,13 +13,16 @@ static var _verified_cache: Dictionary = {}
 static func invalidate(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
-	_verified_cache.erase(gltf_path)
+	var key := NexusUtils.dict_find_path_key(_verified_cache, gltf_path)
+	if not key.is_empty():
+		_verified_cache.erase(key)
 
 
 static func is_verified_recently(gltf_path: String) -> bool:
-	if gltf_path.is_empty() or not _verified_cache.has(gltf_path):
+	var key := NexusUtils.dict_find_path_key(_verified_cache, gltf_path)
+	if key.is_empty():
 		return false
-	var entry: Dictionary = _verified_cache[gltf_path]
+	var entry: Dictionary = _verified_cache[key]
 	if not bool(entry.get("ok", false)):
 		return false
 	var age := Engine.get_process_frames() - int(entry.get("frame", 0))
@@ -34,7 +37,8 @@ static func is_verified_recently(gltf_path: String) -> bool:
 
 static func verify_and_mark(gltf_path: String, tscn_path: String) -> bool:
 	var ok := scene_is_complete(gltf_path, tscn_path)
-	_verified_cache[gltf_path] = {
+	var key := NexusUtils.dict_bind_path(_verified_cache, gltf_path)
+	_verified_cache[key] = {
 		"frame": Engine.get_process_frames(),
 		"ok": ok,
 		"gltf_mtime": (

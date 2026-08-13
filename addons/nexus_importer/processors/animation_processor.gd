@@ -154,8 +154,6 @@ func _merge_animation_library(
 				_update_transform_tracks(
 					final_anim, source_anim, anim_player, search_root, anchor_node_name
 				)
-				if marker_data.has(manifest_key):
-					add_marker_tracks(final_anim, marker_data[manifest_key])
 		else:
 			final_anim = source_anim.duplicate()
 			_repath_tracks(final_anim, anim_player, search_root, anchor_node_name)
@@ -175,6 +173,7 @@ func _merge_animation_library(
 		if marker_data.has(manifest_key):
 			add_marker_tracks(final_anim, marker_data[manifest_key])
 
+		NexusTransformSanitize.sanitize_animation_tracks(final_anim)
 		new_lib.add_animation(anim_name, final_anim)
 		stats.extracted += 1
 

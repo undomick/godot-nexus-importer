@@ -24,6 +24,10 @@ func reimport_from_index() -> void:
 
 	for asset_id in asset_index.keys():
 		var entry = asset_index[asset_id]
+		if not entry is Dictionary:
+			push_warning("Nexus: Asset '%s' has invalid index entry - skipped." % asset_id)
+			skipped += 1
+			continue
 		var rel_path = entry.get("relative_path", "")
 		if rel_path.is_empty():
 			push_warning("Nexus: Asset '%s' has no relative_path - skipped." % asset_id)

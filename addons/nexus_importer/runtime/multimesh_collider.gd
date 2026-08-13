@@ -9,7 +9,9 @@ extends MultiMeshInstance3D
 ## Local transforms for each collision shape (assigned by MultiMesh processor).
 @export var shape_transforms: Array[Transform3D] = []
 
-const DEFAULT_COLLISION_LAYER := 1
+## Physics layers from the MultiMesh collection metadata (assigned by processor).
+@export var collision_layer: int = 1
+@export var collision_mask: int = 1
 
 var _body_rids: Array[RID] = []
 var _debug_nodes: Array[Node3D] = []
@@ -61,8 +63,8 @@ func _generate_bodies() -> void:
 				_create_visual_debug_shape(shape, final_transform * local_xform)
 
 		ps.body_set_state(body_rid, PhysicsServer3D.BODY_STATE_TRANSFORM, final_transform)
-		ps.body_set_collision_layer(body_rid, DEFAULT_COLLISION_LAYER)
-		ps.body_set_collision_mask(body_rid, DEFAULT_COLLISION_LAYER)
+		ps.body_set_collision_layer(body_rid, collision_layer)
+		ps.body_set_collision_mask(body_rid, collision_mask)
 		_body_rids.append(body_rid)
 
 	if debug_mode:

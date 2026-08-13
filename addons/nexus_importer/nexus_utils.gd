@@ -161,9 +161,10 @@ static func remove_corrupt_import_sidecar(path: String) -> bool:
 static func get_gltf_json_text(path: String) -> String:
 	if path.is_empty() or not FileAccess.file_exists(path):
 		return ""
+	var cache_key := dict_bind_path(_gltf_json_cache, path)
 	var mtime := FileAccess.get_modified_time(path)
-	if _gltf_json_cache.has(path):
-		var cached: Dictionary = _gltf_json_cache[path]
+	if not cache_key.is_empty() and _gltf_json_cache.has(cache_key):
+		var cached: Dictionary = _gltf_json_cache[cache_key]
 		if int(cached.get("mtime", -1)) == mtime:
 			return str(cached.get("text", ""))
 	var ext := path.get_extension().to_lower()
@@ -173,19 +174,23 @@ static func get_gltf_json_text(path: String) -> String:
 			return ""
 		var text := extract_json_text_from_glb_file(file)
 		file.close()
-		_gltf_json_cache[path] = {"mtime": mtime, "text": text}
+		if not cache_key.is_empty():
+			_gltf_json_cache[cache_key] = {"mtime": mtime, "text": text}
 		return text
 
 	var text := read_utf8_text(path)
-	_gltf_json_cache[path] = {"mtime": mtime, "text": text}
+	if not cache_key.is_empty():
+		_gltf_json_cache[cache_key] = {"mtime": mtime, "text": text}
 	return text
 
 
 static func invalidate_gltf_json_cache(path: String = "") -> void:
 	if path.is_empty():
 		_gltf_json_cache.clear()
-	else:
-		_gltf_json_cache.erase(path)
+		return
+	var key := dict_find_path_key(_gltf_json_cache, path)
+	if not key.is_empty():
+		_gltf_json_cache.erase(key)
 
 ## Ensures path has res:// prefix for Godot resource loading.
 static func ensure_res_path(path: String) -> String:
@@ -398,6 +403,43 @@ static func to_res_gltf_path(path: String) -> String:
 		return ""
 	return "res://" + absolute.substr(project_root.length())
 
+
+## Slash-normalized path for dict keys and FileAccess. Preserves case.
+## Prefer to_res_gltf_path when the file lives under the Godot project.
+static func canonical_res_path(path: String) -> String:
+	var p := to_res_gltf_path(path)
+	if p.is_empty():
+		p = path.replace("\\", "/").strip_edges()
+	return p
+
+
+## Case-folded identity for comparisons and dict lookup. Do not use for FileAccess.
+static func path_identity_key(path: String) -> String:
+	return canonical_res_path(path).to_lower()
+
+
+## Existing dict key matching path after slash/case normalize, or "".
+static func dict_find_path_key(d: Dictionary, path: String) -> String:
+	var canonical := canonical_res_path(path)
+	if canonical.is_empty():
+		return ""
+	if d.has(canonical):
+		return canonical
+	var folded := path_identity_key(canonical)
+	for key in d.keys():
+		if path_identity_key(str(key)) == folded:
+			return str(key)
+	return ""
+
+
+## Key to insert under: reuse a case-variant already in d, else canonical_res_path.
+static func dict_bind_path(d: Dictionary, path: String) -> String:
+	var existing := dict_find_path_key(d, path)
+	if not existing.is_empty():
+		return existing
+	return canonical_res_path(path)
+
+
 ## Reads NEXUS_ASSET_METADATA from a .gltf or .glb file.
 ## Checks extras, scenes[0].extras and asset.extras (in that order).
 static func get_nexus_metadata(asset_path: String) -> Dictionary:
@@ -411,9 +453,21 @@ static func get_nexus_metadata(asset_path: String) -> Dictionary:
 	if not gltf_data is Dictionary:
 		return {}
 
-	var meta = gltf_data.get("extras", {}).get(NEXUS_ASSET_META_KEY, {})
+	var meta = _nexus_meta_from_extras_object(gltf_data)
 	if meta.is_empty():
-		meta = gltf_data.get("scenes", [{}])[0].get("extras", {}).get(NEXUS_ASSET_META_KEY, {})
+		var scenes = gltf_data.get("scenes", [])
+		if scenes is Array and not scenes.is_empty() and scenes[0] is Dictionary:
+			meta = _nexus_meta_from_extras_object(scenes[0])
 	if meta.is_empty():
-		meta = gltf_data.get("asset", {}).get("extras", {}).get(NEXUS_ASSET_META_KEY, {})
+		meta = _nexus_meta_from_extras_object(gltf_data.get("asset", {}))
 	return meta
+
+
+static func _nexus_meta_from_extras_object(obj) -> Dictionary:
+	if not obj is Dictionary:
+		return {}
+	var extras = obj.get("extras", {})
+	if not extras is Dictionary:
+		return {}
+	var meta = extras.get(NEXUS_ASSET_META_KEY, {})
+	return meta if meta is Dictionary else {}

@@ -31,12 +31,12 @@ static func _ensure_loaded() -> void:
 static func _save_if_dirty() -> void:
 	if not _dirty:
 		return
-	_dirty = false
 	var file := FileAccess.open(STATE_PATH, FileAccess.WRITE)
 	if file == null:
 		return
 	file.store_string(JSON.stringify(_entries, "\t"))
 	file.close()
+	_dirty = false
 
 
 static func get_entry(gltf_path: String) -> Dictionary:
@@ -83,7 +83,4 @@ static func is_unchanged_since_import(gltf_path: String, index_content_hash: Str
 
 
 static func _canonical_path(gltf_path: String) -> String:
-	var canonical := NexusUtils.to_res_gltf_path(gltf_path)
-	if canonical.is_empty():
-		canonical = gltf_path.replace("\\", "/").strip_edges()
-	return canonical
+	return NexusUtils.canonical_res_path(gltf_path)

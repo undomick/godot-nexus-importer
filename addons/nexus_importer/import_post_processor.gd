@@ -71,6 +71,9 @@ func _post_import(scene: Node) -> Object:
 	scene.set_meta("_nexus_export_type", export_type)
 	scene_meta["_summary_gltf_path"] = gltf_path
 
+	# Before ANIMATION_LIB / MULTIMESH_MANIFEST early returns skip _process_scene_tree.
+	NexusTransformSanitize.sanitize_scene_transforms(scene)
+
 	var routed = _route_by_export_type(scene, gltf_path, scene_meta, export_type)
 	if routed != null:
 		return routed
@@ -110,13 +113,20 @@ func _route_by_export_type(
 		return scene
 
 	if export_type == "MULTIMESH_MANIFEST":
-		NexusImportContext.set_multimesh_post_import_active(true)
-		var composite := multimesh_processor.process(gltf_path, scene_meta)
-		NexusImportContext.set_multimesh_post_import_active(false)
-		NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(gltf_path)
-		return composite
+		return _process_multimesh_manifest(gltf_path, scene_meta)
 
 	return null
+
+func _process_multimesh_manifest(gltf_path: String, scene_meta: Dictionary) -> Object:
+	NexusImportContext.set_multimesh_post_import_active(true)
+	var clear_flag := func() -> void:
+		NexusImportContext.set_multimesh_post_import_active(false)
+	clear_flag.call_deferred()
+	var composite: Object = null
+	composite = multimesh_processor.process(gltf_path, scene_meta)
+	NexusImportContext.set_multimesh_post_import_active(false)
+	NexusMultiMeshUtils.invalidate_multimesh_pipeline_cache(gltf_path)
+	return composite
 
 func _process_scene_tree(
 	scene: Node,
@@ -124,10 +134,6 @@ func _process_scene_tree(
 	gltf_path: String,
 	export_type: String
 ) -> void:
-	# Neutralize degenerate (NaN/Inf or singular) Node3D transforms before any
-	# processor or Godot subsystem reads them: physics planes, light culler and
-	# affine_inverse all warn/fail on non-finite or zero-determinant bases.
-	NexusTransformSanitize.sanitize_scene_transforms(scene)
 	root_processor.set_collision_layers(scene, scene_meta, stats)
 	navmesh_processor.process(scene, scene_meta)
 
@@ -246,6 +252,7 @@ func _process_node_recursively(
 	if not skip_geometry_processors:
 		# Resonance before collision (same mesh may become both)
 		if resonance_processor.process(node, node_meta, scene_meta, root, stats):
+			# True only when the MeshInstance3D was removed (discard_mesh).
 			return
 		if collision_processor.process(node, node_meta, scene_meta, root, stats):
 			return

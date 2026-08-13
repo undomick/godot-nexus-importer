@@ -220,6 +220,7 @@ func _resolve_externalized_material(
 
 	var existing_path := str(source.resource_path)
 	if not existing_path.is_empty() and ResourceLoader.exists(existing_path):
+		_check_shader_convert_version(source, existing_path)
 		_externalize_cache[cache_key] = source
 		return source
 
@@ -231,6 +232,7 @@ func _resolve_externalized_material(
 	if ResourceLoader.exists(tres_path) or FileAccess.file_exists(tres_path):
 		var loaded := ResourceLoader.load(tres_path, "", ResourceLoader.CACHE_MODE_REPLACE)
 		if loaded is Material and is_instance_valid(loaded):
+			_check_shader_convert_version(loaded, tres_path)
 			_externalize_cache[cache_key] = loaded
 			_externalize_claimed_paths[tres_path] = true
 			return loaded
@@ -252,6 +254,7 @@ func _resolve_externalized_material(
 		push_warning("Nexus Material: Saved '%s' but reload failed." % tres_path)
 		return null
 
+	_check_shader_convert_version(saved, tres_path)
 	_externalize_cache[cache_key] = saved
 	_externalize_claimed_paths[tres_path] = true
 
@@ -314,6 +317,10 @@ func _ensure_mesh_vertex_colors(node: MeshInstance3D) -> void:
 				if color is Color:
 					color_array.push_back(color)
 				else:
+					if not (color is Array or color is PackedFloat32Array or color is PackedFloat64Array):
+						continue
+					if color.size() < 3:
+						continue
 					var alpha := 1.0
 					if color.size() > 3:
 						alpha = color[3]

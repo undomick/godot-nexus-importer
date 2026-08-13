@@ -9,6 +9,9 @@ func _get_option_visibility(path, for_animation, option):
 
 func _post_process(scene: Node) -> void:
 	if NexusBatchLock.is_active():
+		var locked_path = get_option_value("internal_nexus_path")
+		if locked_path is String and not str(locked_path).is_empty():
+			NexusBatchLock.defer_path(str(locked_path))
 		return
 
 	var gltf_path = get_option_value("internal_nexus_path")

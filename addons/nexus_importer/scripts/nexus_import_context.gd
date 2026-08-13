@@ -173,23 +173,24 @@ static func cancel_instance_pass() -> void:
 static func mark_multimesh_retry(gltf_path: String) -> bool:
 	if gltf_path.is_empty():
 		return false
-	var canonical := NexusUtils.to_res_gltf_path(gltf_path)
+	var canonical := NexusUtils.canonical_res_path(gltf_path)
 	if canonical.is_empty():
-		canonical = gltf_path
-	var count: int = int(_pending_multimesh_retry_paths.get(canonical, 0))
+		return false
+	var key := NexusUtils.dict_bind_path(_pending_multimesh_retry_paths, canonical)
+	var count: int = int(_pending_multimesh_retry_paths.get(key, 0))
 	if count >= MAX_MULTIMESH_REIMPORT_RETRIES:
 		return false
-	_pending_multimesh_retry_paths[canonical] = count + 1
+	_pending_multimesh_retry_paths[key] = count + 1
 	return true
 
 
 static func multimesh_retry_count(gltf_path: String) -> int:
 	if gltf_path.is_empty():
 		return 0
-	var canonical := NexusUtils.to_res_gltf_path(gltf_path)
-	if canonical.is_empty():
-		canonical = gltf_path
-	return int(_pending_multimesh_retry_paths.get(canonical, 0))
+	var key := NexusUtils.dict_find_path_key(_pending_multimesh_retry_paths, gltf_path)
+	if key.is_empty():
+		return 0
+	return int(_pending_multimesh_retry_paths[key])
 
 
 static func multimesh_retry_exhausted(gltf_path: String) -> bool:
@@ -199,10 +200,9 @@ static func multimesh_retry_exhausted(gltf_path: String) -> bool:
 static func clear_multimesh_retry(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
-	var canonical := NexusUtils.to_res_gltf_path(gltf_path)
-	if canonical.is_empty():
-		canonical = gltf_path
-	_pending_multimesh_retry_paths.erase(canonical)
+	var key := NexusUtils.dict_find_path_key(_pending_multimesh_retry_paths, gltf_path)
+	if not key.is_empty():
+		_pending_multimesh_retry_paths.erase(key)
 
 
 static func has_multimesh_retry_paths() -> bool:

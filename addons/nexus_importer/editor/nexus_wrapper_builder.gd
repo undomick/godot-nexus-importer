@@ -42,15 +42,16 @@ func has_pending() -> bool:
 	return not _queue.is_empty()
 
 func is_scene_queued(gltf_path: String) -> bool:
-	return _queue.has(gltf_path)
+	return not NexusUtils.dict_find_path_key(_queue, gltf_path).is_empty()
 
 func _signal_wrapper_queue_idle() -> void:
 	scan_when_idle = true
 
 func queue_scene(gltf_path: String, scene_type: String = "") -> bool:
+	gltf_path = NexusUtils.canonical_res_path(gltf_path)
 	if gltf_path.is_empty():
 		return false
-	if _inherited_aborted.has(gltf_path):
+	if not NexusUtils.dict_find_path_key(_inherited_aborted, gltf_path).is_empty():
 		return false
 	if not NexusSceneUtils.should_create_packed_scene(gltf_path):
 		return false
@@ -74,11 +75,12 @@ func queue_scene(gltf_path: String, scene_type: String = "") -> bool:
 	if NexusBatchLock.is_active():
 		NexusBatchLock.defer_path(gltf_path)
 		return true
-	if _queue.has(gltf_path):
+	var queued := NexusUtils.dict_bind_path(_queue, gltf_path)
+	if _queue.has(queued):
 		if explicit_style:
-			_queue[gltf_path] = scene_type
+			_queue[queued] = scene_type
 		return true
-	_queue[gltf_path] = scene_type
+	_queue[queued] = scene_type
 	return true
 
 func _multimesh_scene_queue_allowed(gltf_path: String) -> bool:
@@ -133,10 +135,11 @@ func _highest_priority_queued_path() -> String:
 	var best_priority := NexusExportOrder.PRIORITY_OTHER + 1
 	var best_defer := 2
 	for path in _queue.keys():
-		if _build_retry_cooldown_until.has(path):
-			if now_frame < int(_build_retry_cooldown_until[path]):
+		var cooldown_key := NexusUtils.dict_find_path_key(_build_retry_cooldown_until, path)
+		if not cooldown_key.is_empty():
+			if now_frame < int(_build_retry_cooldown_until[cooldown_key]):
 				continue
-			_build_retry_cooldown_until.erase(path)
+			_build_retry_cooldown_until.erase(cooldown_key)
 		var priority := NexusExportOrder.export_type_priority_for_gltf(path)
 		var defer_rank := 1 if NexusSceneUtils.gltf_should_defer_within_priority(path) else 0
 		if priority < best_priority:
@@ -152,7 +155,8 @@ func _highest_priority_queued_path() -> String:
 	return best_path
 
 func needs_scene_processing(gltf_path: String) -> bool:
-	if _inherited_aborted.has(gltf_path):
+	gltf_path = NexusUtils.canonical_res_path(gltf_path)
+	if not NexusUtils.dict_find_path_key(_inherited_aborted, gltf_path).is_empty():
 		return false
 	if _is_build_retry_exhausted(gltf_path):
 		return false
@@ -216,32 +220,43 @@ func needs_scene_processing(gltf_path: String) -> bool:
 	return not NexusSceneCompleteness.scene_is_complete(gltf_path, tscn_path)
 
 func _is_build_retry_exhausted(gltf_path: String) -> bool:
-	if gltf_path.is_empty() or not _build_retry_exhausted.has(gltf_path):
+	var key := NexusUtils.dict_find_path_key(_build_retry_exhausted, gltf_path)
+	if gltf_path.is_empty() or key.is_empty():
 		return false
 	if not FileAccess.file_exists(gltf_path):
-		_build_retry_exhausted.erase(gltf_path)
+		_build_retry_exhausted.erase(key)
 		return false
-	var locked_mtime := int(_build_retry_exhausted[gltf_path])
+	var locked_mtime := int(_build_retry_exhausted[key])
 	if FileAccess.get_modified_time(gltf_path) != locked_mtime:
-		_build_retry_exhausted.erase(gltf_path)
-		_build_retry_counts.erase(gltf_path)
+		_build_retry_exhausted.erase(key)
+		var count_key := NexusUtils.dict_find_path_key(_build_retry_counts, gltf_path)
+		if not count_key.is_empty():
+			_build_retry_counts.erase(count_key)
 		return false
 	return true
 
 func reset_build_retries(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
-	_build_retry_counts.erase(gltf_path)
-	_build_retry_cooldown_until.erase(gltf_path)
-	_build_retry_exhausted.erase(gltf_path)
+	var count_key := NexusUtils.dict_find_path_key(_build_retry_counts, gltf_path)
+	if not count_key.is_empty():
+		_build_retry_counts.erase(count_key)
+	var cooldown_key := NexusUtils.dict_find_path_key(_build_retry_cooldown_until, gltf_path)
+	if not cooldown_key.is_empty():
+		_build_retry_cooldown_until.erase(cooldown_key)
+	var exhausted_key := NexusUtils.dict_find_path_key(_build_retry_exhausted, gltf_path)
+	if not exhausted_key.is_empty():
+		_build_retry_exhausted.erase(exhausted_key)
 	NexusSceneCompleteness.invalidate(gltf_path)
 
 func _schedule_build_retry_or_exhaust(gltf_path: String, tscn_path: String) -> void:
 	NexusSceneCompleteness.invalidate(gltf_path)
-	var retries: int = int(_build_retry_counts.get(gltf_path, 0)) + 1
-	_build_retry_counts[gltf_path] = retries
+	var count_key := NexusUtils.dict_bind_path(_build_retry_counts, gltf_path)
+	var retries: int = int(_build_retry_counts.get(count_key, 0)) + 1
+	_build_retry_counts[count_key] = retries
 	if retries < MAX_BUILD_RETRIES:
-		_build_retry_cooldown_until[gltf_path] = (
+		var cooldown_key := NexusUtils.dict_bind_path(_build_retry_cooldown_until, gltf_path)
+		_build_retry_cooldown_until[cooldown_key] = (
 			Engine.get_process_frames() + retries * BUILD_RETRY_BACKOFF_FRAMES
 		)
 		queue_scene(gltf_path)
@@ -251,7 +266,8 @@ func _schedule_build_retry_or_exhaust(gltf_path: String, tscn_path: String) -> v
 		)
 		return
 	var mtime := FileAccess.get_modified_time(gltf_path) if FileAccess.file_exists(gltf_path) else -1
-	_build_retry_exhausted[gltf_path] = mtime
+	var exhausted_key := NexusUtils.dict_bind_path(_build_retry_exhausted, gltf_path)
+	_build_retry_exhausted[exhausted_key] = mtime
 	push_error(
 		"Nexus: Scene '%s' still incomplete after %d build attempt(s); waiting for glTF change."
 		% [tscn_path.get_file(), MAX_BUILD_RETRIES]
@@ -427,13 +443,15 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 	NexusEditorViewportGuard.pop_pause(ei)
 
 	if root == null:
-		var timeouts: int = int(_inherited_open_timeout_counts.get(gltf_path, 0)) + 1
+		var timeout_key := NexusUtils.dict_bind_path(_inherited_open_timeout_counts, gltf_path)
+		var timeouts: int = int(_inherited_open_timeout_counts.get(timeout_key, 0)) + 1
 		_log_inherited_open_timeout(ei, gltf_path, timeouts, MAX_INHERITED_OPEN_TIMEOUTS)
 		await _close_tab_by_path(ei, gltf_path)
 		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 		if timeouts > MAX_INHERITED_OPEN_TIMEOUTS:
-			_inherited_open_timeout_counts.erase(gltf_path)
-			_inherited_aborted[gltf_path] = true
+			_inherited_open_timeout_counts.erase(timeout_key)
+			var abort_key := NexusUtils.dict_bind_path(_inherited_aborted, gltf_path)
+			_inherited_aborted[abort_key] = true
 			if export_type == "MULTIMESH_MANIFEST":
 				# handle_multimesh_inherited_failure already finishes; do not double-finish.
 				_handle_multimesh_inherited_failure(
@@ -446,11 +464,13 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 			)
 			_finish_inherited_creation()
 			return
-		_inherited_open_timeout_counts[gltf_path] = timeouts
+		_inherited_open_timeout_counts[timeout_key] = timeouts
 		_finish_inherited_creation()
 		return
 
-	_inherited_open_timeout_counts.erase(gltf_path)
+	var timeout_done := NexusUtils.dict_find_path_key(_inherited_open_timeout_counts, gltf_path)
+	if not timeout_done.is_empty():
+		_inherited_open_timeout_counts.erase(timeout_done)
 
 	root = await _ensure_composition_instances_resolved(ei, root, gltf_path)
 	if root == null:
@@ -527,19 +547,26 @@ func _finish_inherited_creation() -> void:
 func clear_inherited_abort(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
-	_inherited_aborted.erase(gltf_path)
-	_inherited_open_timeout_counts.erase(gltf_path)
-	_placeholder_retry_counts.erase(gltf_path)
+	var abort_key := NexusUtils.dict_find_path_key(_inherited_aborted, gltf_path)
+	if not abort_key.is_empty():
+		_inherited_aborted.erase(abort_key)
+	var timeout_key := NexusUtils.dict_find_path_key(_inherited_open_timeout_counts, gltf_path)
+	if not timeout_key.is_empty():
+		_inherited_open_timeout_counts.erase(timeout_key)
+	var retry_key := NexusUtils.dict_find_path_key(_placeholder_retry_counts, gltf_path)
+	if not retry_key.is_empty():
+		_placeholder_retry_counts.erase(retry_key)
 	reset_build_retries(gltf_path)
 
 func mark_inherited_aborted(gltf_path: String) -> void:
 	if gltf_path.is_empty():
 		return
-	_inherited_aborted[gltf_path] = true
+	var abort_key := NexusUtils.dict_bind_path(_inherited_aborted, gltf_path)
+	_inherited_aborted[abort_key] = true
 	NexusSceneCompleteness.invalidate(gltf_path)
 
 func is_inherited_aborted(gltf_path: String) -> bool:
-	return not gltf_path.is_empty() and _inherited_aborted.has(gltf_path)
+	return not gltf_path.is_empty() and not NexusUtils.dict_find_path_key(_inherited_aborted, gltf_path).is_empty()
 
 func _request_multimesh_inherited_scene_queue() -> void:
 	if _plugin and _plugin.has_method("request_multimesh_inherited_scene_queue"):
@@ -823,7 +850,9 @@ func _has_physics_body_recursive(node: Node) -> bool:
 
 func _abort_composition_inherited_for_placeholders(gltf_path: String, reason: String) -> void:
 	mark_inherited_aborted(gltf_path)
-	_placeholder_retry_counts.erase(gltf_path)
+	var retry_key := NexusUtils.dict_find_path_key(_placeholder_retry_counts, gltf_path)
+	if not retry_key.is_empty():
+		_placeholder_retry_counts.erase(retry_key)
 	push_warning(
 		"Nexus Inherited: '%s' %s; aborting inherited build (retry after re-export or Reimport Assets)."
 		% [gltf_path.get_file(), reason]
@@ -884,7 +913,7 @@ func _ensure_composition_instances_resolved(
 	if not NexusSceneUtils.is_composition_gltf(gltf_path):
 		return root
 	if not InstancingProcessor.has_unresolved_placeholders(root):
-		_placeholder_retry_counts.erase(gltf_path)
+		_erase_placeholder_retry(gltf_path)
 		return root
 
 	# Missing targets cannot be fixed by reimport; abort to stop tab thrashing.
@@ -897,7 +926,8 @@ func _ensure_composition_instances_resolved(
 		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 		return null
 
-	var retries: int = int(_placeholder_retry_counts.get(gltf_path, 0))
+	var retry_key := NexusUtils.dict_bind_path(_placeholder_retry_counts, gltf_path)
+	var retries: int = int(_placeholder_retry_counts.get(retry_key, 0))
 	if retries >= MAX_PLACEHOLDER_REIMPORT_RETRIES:
 		_abort_composition_inherited_for_placeholders(
 			gltf_path,
@@ -907,7 +937,7 @@ func _ensure_composition_instances_resolved(
 		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 		return null
 
-	_placeholder_retry_counts[gltf_path] = retries + 1
+	_placeholder_retry_counts[retry_key] = retries + 1
 	push_warning(
 		"Nexus Inherited: '%s' opened with unresolved instance placeholders; reimporting non-deferred and reopening (retry %d)."
 		% [gltf_path.get_file(), retries + 1]
@@ -947,7 +977,7 @@ func _ensure_composition_instances_resolved(
 		await _close_tab_by_path(ei, gltf_path)
 		NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 		return null
-	_placeholder_retry_counts.erase(gltf_path)
+	_erase_placeholder_retry(gltf_path)
 	return reopened
 
 func _resolve_instances_before_inherited_save(root: Node, gltf_path: String) -> void:
@@ -1037,10 +1067,12 @@ func _close_tab_by_path(editor_interface: EditorInterface, scene_path: String) -
 	NexusEditorViewportGuard.pop_pause(editor_interface)
 
 func _canonical_gltf_path(gltf_path: String) -> String:
-	var expected := NexusUtils.to_res_gltf_path(gltf_path)
-	if expected.is_empty():
-		expected = gltf_path.replace("\\", "/").strip_edges()
-	return expected
+	return NexusUtils.canonical_res_path(gltf_path)
+
+func _erase_placeholder_retry(gltf_path: String) -> void:
+	var key := NexusUtils.dict_find_path_key(_placeholder_retry_counts, gltf_path)
+	if not key.is_empty():
+		_placeholder_retry_counts.erase(key)
 
 func _is_neutral_keeper_root(root: Node) -> bool:
 	# After closing the last tab, Godot leaves no valid edited root.
@@ -1049,14 +1081,15 @@ func _is_neutral_keeper_root(root: Node) -> bool:
 	return false
 
 func _scene_paths_match_gltf(scene_path: String, expected_gltf: String) -> bool:
-	var edited_path := scene_path.replace("\\", "/")
-	if edited_path.is_empty():
+	var edited_path := NexusUtils.canonical_res_path(scene_path)
+	var expected := NexusUtils.canonical_res_path(expected_gltf)
+	if edited_path.is_empty() or expected.is_empty():
 		return false
-	if edited_path == expected_gltf:
+	if NexusUtils.path_identity_key(edited_path) == NexusUtils.path_identity_key(expected):
 		return true
 	return (
-		edited_path.get_base_dir() == expected_gltf.get_base_dir()
-		and edited_path.get_basename() == expected_gltf.get_basename()
+		edited_path.get_base_dir().to_lower() == expected.get_base_dir().to_lower()
+		and edited_path.get_basename().to_lower() == expected.get_basename().to_lower()
 	)
 
 func _is_expected_inherited_edit_root(root: Node, gltf_path: String) -> bool:

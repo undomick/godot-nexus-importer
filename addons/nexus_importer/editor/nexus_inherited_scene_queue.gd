@@ -61,6 +61,7 @@ func has_pending_inherited_scene_work(wrapper_builder: NexusWrapperBuilder) -> b
 	return (
 		not multimesh_eval.ready_to_queue.is_empty()
 		or not multimesh_eval.waiting_on_import.is_empty()
+		or not multimesh_eval.waiting_on_sources.is_empty()
 	)
 
 func _composition_paths_from_index() -> Array[String]:
@@ -75,6 +76,8 @@ func _composition_paths_from_index() -> Array[String]:
 	var by_canonical: Dictionary = {}
 	for asset_id in asset_index.keys():
 		var entry = asset_index[asset_id]
+		if not entry is Dictionary:
+			continue
 		var rel_path: String = entry.get("relative_path", "")
 		if rel_path.is_empty():
 			continue
