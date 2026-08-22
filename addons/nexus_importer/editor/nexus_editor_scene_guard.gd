@@ -3,8 +3,11 @@ extends RefCounted
 
 ## Closes open glTF, wrapper, and inherited editor tabs before reimport.
 ## Falls back to Godot's empty edited-root state when no keeper tab remains.
+## Focus and close are split across calls so Godot 4.7+ edited_scene indices stay valid.
 
 const SCENE_SWITCH_SETTLE_FRAMES := 2
+
+static var _busy: bool = false
 
 
 static func related_paths_for_gltf(gltf_path: String) -> PackedStringArray:
@@ -137,7 +140,10 @@ static func _clear_edited_flag(editor_interface: EditorInterface) -> void:
 static func stabilize_editor_after_close(editor_interface: EditorInterface) -> void:
 	if editor_interface == null:
 		return
+	if _busy:
+		return
 
+	_busy = true
 	NexusEditorViewportGuard.push_pause(editor_interface)
 	var attempts := 0
 	while attempts < 8:
@@ -172,6 +178,7 @@ static func stabilize_editor_after_close(editor_interface: EditorInterface) -> v
 			break
 		break
 	NexusEditorViewportGuard.pop_pause(editor_interface)
+	_busy = false
 
 
 static func close_open_nexus_asset_tabs_if_any(editor_interface: EditorInterface) -> Dictionary:
@@ -187,6 +194,12 @@ static func close_one_open_nexus_asset_tab_if_any(editor_interface: EditorInterf
 	var close_errors: Array = []
 	if editor_interface == null:
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
+	if _busy:
+		var busy_blocking := blocking_path_set_for_gltfs(
+			collect_gltf_paths_from_open_nexus_tabs(editor_interface)
+		)
+		var busy_remaining := _collect_tabs_to_close(editor_interface, busy_blocking).size()
+		return {"closed": closed, "close_errors": close_errors, "remaining": busy_remaining}
 
 	var gltf_paths := collect_gltf_paths_from_open_nexus_tabs(editor_interface)
 	if gltf_paths.is_empty():
@@ -200,6 +213,7 @@ static func close_one_open_nexus_asset_tab_if_any(editor_interface: EditorInterf
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
+	_busy = true
 	NexusEditorViewportGuard.push_pause(editor_interface)
 	var result := _close_one_blocking_tab(editor_interface, to_close)
 	if result.get("closed_path", "") != "":
@@ -207,9 +221,14 @@ static func close_one_open_nexus_asset_tab_if_any(editor_interface: EditorInterf
 	if result.has("err"):
 		close_errors.append({"path": result.get("closed_path", ""), "err": result["err"]})
 	var remaining := _collect_tabs_to_close(editor_interface, blocking).size()
-	if remaining == 0:
+	# Focus-only step still has tabs to close next frame - do not stabilize yet.
+	if remaining == 0 and not result.has("focused_path"):
+		_busy = false
 		stabilize_editor_after_close(editor_interface)
+		NexusEditorViewportGuard.pop_pause(editor_interface)
+		return {"closed": closed, "close_errors": close_errors, "remaining": remaining}
 	NexusEditorViewportGuard.pop_pause(editor_interface)
+	_busy = false
 	return {"closed": closed, "close_errors": close_errors, "remaining": remaining}
 
 
@@ -225,6 +244,8 @@ static func _scene_still_open(editor_interface: EditorInterface, scene_path: Str
 	return false
 
 
+## Close current blocking tab, or focus a blocking tab without closing (two-phase).
+## Returns {"closed_path","err"}, {"focused_path"}, or {}.
 static func _close_one_blocking_tab(
 	editor_interface: EditorInterface, to_close: Array[String]
 ) -> Dictionary:
@@ -251,6 +272,8 @@ static func _close_one_blocking_tab(
 			return {}
 		_clear_edited_flag(editor_interface)
 		editor_interface.open_scene_from_path(scene_path, false)
+		# Do not close in the same call - Godot 4.7+ stale edited_scene index crash.
+		return {"focused_path": scene_path}
 
 	if editor_interface.get_edited_scene_root() == null:
 		return {}
@@ -267,6 +290,10 @@ static func close_open_scenes_for_reimport(
 
 	if editor_interface == null or gltf_paths.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
+	if _busy:
+		var busy_blocking := blocking_path_set_for_gltfs(gltf_paths)
+		var busy_remaining := _collect_tabs_to_close(editor_interface, busy_blocking).size()
+		return {"closed": closed, "close_errors": close_errors, "remaining": busy_remaining}
 
 	var blocking := blocking_path_set_for_gltfs(gltf_paths)
 	if blocking.is_empty():
@@ -276,9 +303,10 @@ static func close_open_scenes_for_reimport(
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
+	_busy = true
 	NexusEditorViewportGuard.push_pause(editor_interface)
 
-	# Re-collect after each close so edited_scene indices stay valid (Godot 4.7+).
+	# Re-collect after each step. Focus and close are never in the same iteration.
 	var safety := 0
 	while safety < 64:
 		safety += 1
@@ -288,6 +316,9 @@ static func close_open_scenes_for_reimport(
 		var result := _close_one_blocking_tab(editor_interface, to_close)
 		if result.is_empty():
 			break
+		if result.has("focused_path"):
+			# Next iteration closes the newly focused tab without another open.
+			continue
 		var closed_path := str(result.get("closed_path", ""))
 		if closed_path != "":
 			closed.append(closed_path)
@@ -297,6 +328,7 @@ static func close_open_scenes_for_reimport(
 		if close_err != OK and close_err != ERR_DOES_NOT_EXIST:
 			break
 
+	_busy = false
 	stabilize_editor_after_close(editor_interface)
 	NexusEditorViewportGuard.pop_pause(editor_interface)
 
@@ -321,6 +353,10 @@ static func close_open_scenes_for_reimport_async(
 
 	if editor_interface == null or gltf_paths.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
+	if _busy:
+		var busy_blocking := blocking_path_set_for_gltfs(gltf_paths)
+		var busy_remaining := _collect_tabs_to_close(editor_interface, busy_blocking).size()
+		return {"closed": closed, "close_errors": close_errors, "remaining": busy_remaining}
 
 	var blocking := blocking_path_set_for_gltfs(gltf_paths)
 	if blocking.is_empty():
@@ -330,6 +366,7 @@ static func close_open_scenes_for_reimport_async(
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
+	_busy = true
 	NexusEditorViewportGuard.push_pause(editor_interface)
 
 	var safety := 0
@@ -341,6 +378,9 @@ static func close_open_scenes_for_reimport_async(
 		var result := _close_one_blocking_tab(editor_interface, to_close)
 		if result.is_empty():
 			break
+		if result.has("focused_path"):
+			await _settle_scene_tree(scene_tree)
+			continue
 		var closed_path := str(result.get("closed_path", ""))
 		if closed_path != "":
 			closed.append(closed_path)
@@ -351,6 +391,7 @@ static func close_open_scenes_for_reimport_async(
 		if close_err != OK and close_err != ERR_DOES_NOT_EXIST:
 			break
 
+	_busy = false
 	stabilize_editor_after_close(editor_interface)
 	await _settle_scene_tree(scene_tree)
 	NexusEditorViewportGuard.pop_pause(editor_interface)
