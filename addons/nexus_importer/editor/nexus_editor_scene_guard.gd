@@ -1,7 +1,8 @@
 class_name NexusEditorSceneGuard
 extends RefCounted
 
-## Closes open glTF, wrapper, and inherited editor tabs before reimport.
+## Closes open glTF editor tabs before reimport.
+## Inherited and wrapper tabs stay open across reimport and Blender re-export.
 ## Falls back to Godot's empty edited-root state when no keeper tab remains.
 ## Focus and close are split across calls so Godot 4.7+ edited_scene indices stay valid.
 
@@ -27,6 +28,48 @@ static func related_paths_for_gltf(gltf_path: String) -> PackedStringArray:
 	result.append(NexusPaths.wrapper_path_for(res_path))
 	result.append(NexusPaths.inherited_path_for(res_path))
 	return result
+
+
+static func is_inherited_or_wrapper_scene(scene_path: String) -> bool:
+	var file_name := scene_path.get_file()
+	return file_name.ends_with("_wrapper.tscn") or file_name.ends_with("_inherited.tscn")
+
+
+## resources_reimporting must not close inherited or wrapper tabs.
+## EditorNode has already stored the open instance Node* on that signal and
+## still reads scene_file_path from it in reload_instances (resources_reimported).
+static func manual_reimport_scene_plan(edited_path: String, gltf_path: String) -> Dictionary:
+	var keep_open := false
+	var edited := edited_path.replace("\\", "/").strip_edges()
+	if is_inherited_or_wrapper_scene(edited):
+		for related in related_paths_for_gltf(gltf_path):
+			if related == edited:
+				keep_open = true
+				break
+	return {
+		"close_on_reimporting": false,
+		"close_on_reimported": false,
+		"reopen_path": "",
+		"keep_open": keep_open,
+	}
+
+
+static func paths_closed_on_gltf_refresh(open_paths: Array) -> Array[String]:
+	var closing: Array[String] = []
+	for raw in open_paths:
+		var scene_path := str(raw).replace("\\", "/").strip_edges()
+		if scene_path.is_empty():
+			continue
+		if is_inherited_or_wrapper_scene(scene_path):
+			continue
+		closing.append(scene_path)
+	return closing
+
+
+static func should_close_tab_after_inherited_save(saved_path: String, was_open: bool) -> bool:
+	if was_open and is_inherited_or_wrapper_scene(saved_path):
+		return false
+	return true
 
 
 static func gltf_path_from_nexus_scene_path(scene_path: String) -> String:
@@ -126,7 +169,7 @@ static func _collect_tabs_to_close(
 		var edited_path: String = edited_root.scene_file_path
 		if blocking.has(edited_path) and edited_path not in to_close:
 			to_close.append(edited_path)
-	return to_close
+	return paths_closed_on_gltf_refresh(to_close)
 
 
 static func _clear_edited_flag(editor_interface: EditorInterface) -> void:

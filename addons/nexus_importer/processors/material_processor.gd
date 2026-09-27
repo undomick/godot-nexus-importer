@@ -15,6 +15,7 @@ var _externalize_cache: Dictionary = {}
 var _externalize_claimed_paths: Dictionary = {}
 ## True when material_index relative_path was rewritten (.tres -> .material).
 var _index_dirty: bool = false
+static var _pending_fs_paths: Array[String] = []
 
 func _load_material_index() -> bool:
 	var path = NexusPaths.material_index_path()
@@ -71,70 +72,142 @@ func _tres_to_material_path(path: String) -> String:
 		return path.get_basename() + ".material"
 	return path
 
-## When material_ext is MAT, convert text .tres to binary .material via ResourceSaver, then delete .tres.
+func _file_on_disk(path: String) -> bool:
+	return not path.is_empty() and FileAccess.file_exists(path)
+
+func _touch_editor_files(paths: Array) -> void:
+	if not Engine.is_editor_hint():
+		return
+	var fs := EditorInterface.get_resource_filesystem()
+	var scanning := fs == null or fs.is_scanning()
+	for path in paths:
+		if not path is String or path.is_empty():
+			continue
+		if scanning:
+			if path not in _pending_fs_paths:
+				_pending_fs_paths.append(path)
+		else:
+			fs.update_file(path)
+
+func flush_pending_filesystem_updates() -> void:
+	if _pending_fs_paths.is_empty():
+		return
+	if not Engine.is_editor_hint():
+		_pending_fs_paths.clear()
+		return
+	var fs := EditorInterface.get_resource_filesystem()
+	if fs == null or fs.is_scanning():
+		return
+	var pending := _pending_fs_paths.duplicate()
+	_pending_fs_paths.clear()
+	for path in pending:
+		fs.update_file(path)
+
+func _point_index_at_material(mat_entry: Dictionary, mat_path: String) -> void:
+	var rel := mat_path.replace("res://", "")
+	if str(mat_entry.get("relative_path", "")) == rel:
+		return
+	mat_entry["relative_path"] = rel
+	_mark_index_dirty()
+
+func _reload_saved_material(mat_path: String, saved: Material) -> void:
+	var mode := ResourceLoader.CACHE_MODE_REPLACE
+	if saved is ShaderMaterial and (saved.next_pass != null or saved.shader != null):
+		mode = ResourceLoader.CACHE_MODE_REPLACE_DEEP
+	ResourceLoader.load(mat_path, "", mode)
+
 func _convert_to_material_if_needed(resource_path: String, mat_entry: Dictionary) -> String:
 	var mat_ext := str(mat_entry.get("material_ext", "TRES"))
 	if mat_ext != "MAT" or resource_path.is_empty():
 		return resource_path
 
-	if resource_path.ends_with(".material"):
-		if ResourceLoader.exists(resource_path) or FileAccess.file_exists(resource_path):
-			return resource_path
-		var sibling_tres := resource_path.get_basename() + ".tres"
-		if ResourceLoader.exists(sibling_tres) or FileAccess.file_exists(sibling_tres):
-			resource_path = sibling_tres
-		else:
-			return resource_path
-
-	var mat_path := _tres_to_material_path(resource_path)
-	var tres_exists := ResourceLoader.exists(resource_path) or FileAccess.file_exists(resource_path)
-	var mat_exists := ResourceLoader.exists(mat_path) or FileAccess.file_exists(mat_path)
-
-	if mat_exists:
-		var tres_mtime := 0
-		if FileAccess.file_exists(resource_path):
-			tres_mtime = FileAccess.get_modified_time(resource_path)
-		var mat_mtime := FileAccess.get_modified_time(mat_path)
-		if mat_mtime >= tres_mtime or not FileAccess.file_exists(resource_path):
-			if str(mat_entry.get("relative_path", "")).ends_with(".tres"):
-				mat_entry["relative_path"] = mat_path.replace("res://", "")
-				_mark_index_dirty()
-			if FileAccess.file_exists(resource_path) and resource_path.ends_with(".tres"):
-				_delete_tres_file(resource_path)
-			return mat_path
-
-	if not tres_exists:
-		return mat_path if mat_exists else resource_path
-
-	var main_mat = ResourceLoader.load(resource_path, "", ResourceLoader.CACHE_MODE_REPLACE)
-	if not is_instance_valid(main_mat):
-		push_warning("Nexus Material: Could not load '%s' for .material conversion." % resource_path)
+	var tres_path := resource_path
+	var mat_path := resource_path
+	if resource_path.ends_with(".tres"):
+		mat_path = _tres_to_material_path(resource_path)
+	elif resource_path.ends_with(".material"):
+		mat_path = resource_path
+		tres_path = resource_path.get_basename() + ".tres"
+	else:
 		return resource_path
 
-	var pass1_tres := ""
-	if main_mat is ShaderMaterial and main_mat.next_pass is ShaderMaterial:
-		pass1_tres = str(main_mat.next_pass.resource_path)
-		if not pass1_tres.is_empty() and pass1_tres.ends_with(".tres"):
-			var pass1_mat := pass1_tres.get_basename() + ".material"
-			var pass_err := ResourceSaver.save(main_mat.next_pass, pass1_mat)
-			if pass_err != OK:
-				push_warning(
-					"Nexus Material: Could not save pass material '%s' (%s)."
-					% [pass1_mat, error_string(pass_err)]
-				)
+	if not _file_on_disk(tres_path):
+		if _file_on_disk(mat_path):
+			_point_index_at_material(mat_entry, mat_path)
+			return mat_path
+		return resource_path
 
+	var main_mat = ResourceLoader.load(tres_path, "", ResourceLoader.CACHE_MODE_REPLACE)
+	if not is_instance_valid(main_mat):
+		push_warning("Nexus Material: Could not load '%s' for .material conversion." % tres_path)
+		return mat_path if _file_on_disk(mat_path) else resource_path
+
+	var pass1_tres := _save_pass1_material(main_mat)
 	var save_err := ResourceSaver.save(main_mat, mat_path)
 	if save_err != OK:
 		push_warning("Nexus Material: Could not save '%s' (%s)." % [mat_path, error_string(save_err)])
 		return resource_path
 
-	_delete_tres_file(resource_path)
+	_reload_saved_material(mat_path, main_mat)
+	_delete_tres_file(tres_path)
+	var touched: Array = [mat_path, tres_path]
 	if not pass1_tres.is_empty():
 		_delete_tres_file(pass1_tres)
-
-	mat_entry["relative_path"] = mat_path.replace("res://", "")
-	_mark_index_dirty()
+		touched.append(pass1_tres.get_basename() + ".material")
+		touched.append(pass1_tres)
+	_point_index_at_material(mat_entry, mat_path)
+	_touch_editor_files(touched)
 	return mat_path
+
+func _save_pass1_material(main_mat: Material) -> String:
+	if not (main_mat is ShaderMaterial) or not (main_mat.next_pass is ShaderMaterial):
+		return ""
+	var pass_path := str(main_mat.next_pass.resource_path)
+	var pass_tres := ""
+	if pass_path.ends_with(".tres"):
+		pass_tres = pass_path
+	elif pass_path.ends_with(".material"):
+		var sibling := pass_path.get_basename() + ".tres"
+		if _file_on_disk(sibling):
+			pass_tres = sibling
+	if not _file_on_disk(pass_tres):
+		return ""
+	var to_save: Material = main_mat.next_pass
+	if pass_tres != pass_path:
+		var loaded = ResourceLoader.load(pass_tres, "", ResourceLoader.CACHE_MODE_REPLACE)
+		if not (loaded is Material):
+			return ""
+		to_save = loaded
+	var pass_mat_path := pass_tres.get_basename() + ".material"
+	var pass_err := ResourceSaver.save(to_save, pass_mat_path)
+	if pass_err != OK:
+		push_warning(
+			"Nexus Material: Could not save pass material '%s' (%s)."
+			% [pass_mat_path, error_string(pass_err)]
+		)
+		return ""
+	_reload_saved_material(pass_mat_path, to_save)
+	return pass_tres
+
+## Editor hook: convert MAT entries when a .tres is already on disk, without a glTF reimport.
+func convert_exported_materials() -> void:
+	if not _load_material_index():
+		return
+	for mat_id in _material_index.keys():
+		var mat_entry = _material_index[mat_id]
+		if not mat_entry is Dictionary:
+			continue
+		if str(mat_entry.get("material_ext", "TRES")) != "MAT":
+			continue
+		var rel_path := str(mat_entry.get("relative_path", ""))
+		if rel_path.is_empty():
+			continue
+		var resource_path := NexusUtils.validate_index_path(rel_path)
+		if resource_path.is_empty():
+			continue
+		_convert_to_material_if_needed(resource_path, mat_entry)
+	flush_index_if_dirty()
+	flush_pending_filesystem_updates()
 
 func process(node: Node, stats: Dictionary) -> void:
 	if not node is MeshInstance3D or not is_instance_valid(node.mesh):

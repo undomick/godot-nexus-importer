@@ -18,6 +18,7 @@ const NexusSceneCompleteness = preload(
 const MultiMeshImportOrchestratorScript = preload(
 	"res://addons/nexus_importer/editor/multimesh_import_orchestrator.gd"
 )
+const MaterialProcessorScript = preload("res://addons/nexus_importer/processors/material_processor.gd")
 
 const MENU_ID_IMPORT_MODE = 0
 const MENU_ID_REIMPORT_ASSETS = 1
@@ -45,6 +46,8 @@ var _startup_catchup_done: bool = false
 var _multimesh_scan_cooldown_frames: int = 0
 var _batch_lock_scene_guard_applied: bool = false
 var _fs_comp_resolution_reimport_active: bool = false
+var _material_convert_busy: bool = false
+var _material_index_mtime: int = -2
 
 
 func _enter_tree():
@@ -54,6 +57,8 @@ func _enter_tree():
 		fs.resources_reimported.connect(_on_resources_reimported)
 	if not fs.resources_reimporting.is_connected(_on_resources_reimporting):
 		fs.resources_reimporting.connect(_on_resources_reimporting)
+	if not fs.filesystem_changed.is_connected(_on_filesystem_changed):
+		fs.filesystem_changed.connect(_on_filesystem_changed)
 
 	_reimport_manager = NexusReimportManagerScript.new(self)
 	_wrapper_builder = NexusWrapperBuilderScript.new(self)
@@ -89,6 +94,8 @@ func _exit_tree():
 		fs.resources_reimported.disconnect(_on_resources_reimported)
 	if fs.resources_reimporting.is_connected(_on_resources_reimporting):
 		fs.resources_reimporting.disconnect(_on_resources_reimporting)
+	if fs.filesystem_changed.is_connected(_on_filesystem_changed):
+		fs.filesystem_changed.disconnect(_on_filesystem_changed)
 
 	_reimport_manager = null
 	_wrapper_builder = null
@@ -150,6 +157,7 @@ func _process(_delta):
 		_reimport_manager.cooldown_remaining = 3
 		return
 
+	_convert_exported_materials_if_index_changed()
 	_reimport_manager.tick_deferred_retries()
 
 	if _wrapper_builder.has_pending() or _wrapper_builder.is_busy():
@@ -388,12 +396,43 @@ func _try_finalize_mass_import_when_idle() -> void:
 	NexusImportContextScript.set_mass_import_active(false)
 
 
+func _on_filesystem_changed() -> void:
+	_convert_exported_materials()
+
+
+func _convert_exported_materials_if_index_changed() -> void:
+	var index_path := NexusPaths.material_index_path()
+	var mtime := -1
+	if FileAccess.file_exists(index_path):
+		mtime = FileAccess.get_modified_time(index_path)
+	if mtime == _material_index_mtime:
+		return
+	_convert_exported_materials()
+
+
+func _convert_exported_materials() -> void:
+	if _material_convert_busy:
+		return
+	var fs := get_editor_interface().get_resource_filesystem()
+	if fs.is_scanning():
+		return
+	_material_convert_busy = true
+	var processor := MaterialProcessorScript.new()
+	processor.convert_exported_materials()
+	_material_convert_busy = false
+	var index_path := NexusPaths.material_index_path()
+	if FileAccess.file_exists(index_path):
+		_material_index_mtime = FileAccess.get_modified_time(index_path)
+	else:
+		_material_index_mtime = -1
+
+
 func _on_resources_reimporting(_resources: PackedStringArray):
 	if _reimport_manager == null:
 		return
 	var gltf_paths := _collect_gltf_paths_from_resources(_resources)
-	if not gltf_paths.is_empty():
-		_reimport_manager.prepare_editor_scenes_for_reimport(gltf_paths)
+	# EditorNode already stored instance Node* on this signal. Closing an
+	# inherited or wrapper tab here frees scene_file_path before reload_instances.
 	if NexusImportContextScript.is_instance_pass_active():
 		return
 	if NexusImportContextScript.is_composition_resolution_reimport():

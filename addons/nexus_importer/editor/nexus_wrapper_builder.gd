@@ -398,6 +398,7 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 	var target_script_path = meta.get("script_path", "")
 
 	var ei = _plugin.get_editor_interface()
+	var inherited_was_open := _is_scene_open(ei, tscn_path)
 	var previous_scene_path := ""
 	var current_root = ei.get_edited_scene_root()
 	if current_root and not current_root.scene_file_path.is_empty():
@@ -511,7 +512,7 @@ func build_inherited_scene_async(gltf_path: String) -> void:
 		return
 	print_rich("[color=cyan]Nexus Inherited:[/color] Created '%s'." % tscn_path.get_file())
 
-	await _release_inherited_edit_tab(ei, root, tscn_path, previous_scene_path)
+	await _release_inherited_edit_tab(ei, root, tscn_path, previous_scene_path, inherited_was_open)
 
 	NexusEditorSceneGuard.stabilize_editor_after_close(ei)
 
@@ -1007,13 +1008,15 @@ func _release_inherited_edit_tab(
 	saved_root: Node,
 	saved_tscn_path: String,
 	previous_scene_path: String,
+	inherited_was_open: bool = false,
 ) -> void:
 	if editor_interface == null:
 		return
 	if saved_root != null and is_instance_valid(saved_root):
 		editor_interface.set_object_edited(saved_root, false)
 
-	await _close_tab_by_path(editor_interface, saved_tscn_path)
+	if NexusEditorSceneGuard.should_close_tab_after_inherited_save(saved_tscn_path, inherited_was_open):
+		await _close_tab_by_path(editor_interface, saved_tscn_path)
 
 	if not previous_scene_path.is_empty() and previous_scene_path != saved_tscn_path:
 		if FileAccess.file_exists(previous_scene_path) and _is_scene_open(editor_interface, previous_scene_path):
