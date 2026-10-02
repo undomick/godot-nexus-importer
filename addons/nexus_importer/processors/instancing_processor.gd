@@ -119,8 +119,6 @@ func _instantiate_scene(
 		return false
 
 	var base_name := NexusUtils.sanitize_node_name(node.name)
-	# node is still a child of parent here; exclude it so the replacement keeps
-	# the placeholder's name instead of being suffixed _001 next to it.
 	instance.name = NexusUtils.unique_sibling_name(parent, base_name, node)
 	instance.transform = _sanitize_instance_transform(node.transform, gltf_context)
 
@@ -216,17 +214,23 @@ func _load_asset_index() -> Dictionary:
 
 func _resolve_scene_path_from_asset_id(asset_id: String, root: Node, gltf_context: String) -> String:
 	var asset_index = _load_asset_index()
-	if not asset_index.has(asset_id):
+	var entry: Dictionary = (
+		asset_index[asset_id]
+		if asset_index.has(asset_id)
+		else NexusAssetIndexLookup.index_entry_for_asset_id(asset_id)
+	)
+	if entry.is_empty():
 		push_error("Nexus Instancer: Asset ID '%s' not found.%s" % [asset_id, gltf_context])
 		return ""
 
-	var entry = asset_index[asset_id]
 	if not entry is Dictionary:
 		push_error("Nexus Instancer: Invalid index entry for Asset ID '%s'.%s" % [asset_id, gltf_context])
 		return ""
 
 	var rel = entry.get("relative_path", "")
 	var base_gltf_path = NexusUtils.validate_index_path(rel)
+	if base_gltf_path.is_empty():
+		base_gltf_path = NexusAssetIndexLookup.gltf_path_for_asset_id(asset_id)
 	if base_gltf_path.is_empty():
 		push_error("Nexus Instancer: Invalid path in index for Asset ID '%s'.%s" % [asset_id, gltf_context])
 		return ""

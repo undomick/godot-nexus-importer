@@ -23,7 +23,6 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 			"Nexus Resonance: Rejected unsafe material path '%s' on '%s'."
 			% [raw_material_path, node.name]
 		)
-	# Sidecar mesh for ResonanceGeometry; drop the glTF MeshInstance3D only when explicitly requested.
 	var gltf_path: String = root.get_meta("_nexus_gltf_path", "")
 	if gltf_path.is_empty():
 		push_warning("Nexus Resonance: No _nexus_gltf_path on root - cannot save mesh sidecar.")
@@ -33,7 +32,6 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	var node_name_for_resonance: String = node.name
 	var gltf_dir = gltf_path.get_base_dir()
 	var gltf_basename = gltf_path.get_file().get_basename()
-	# Avoid duplication: if node.name is "SM_Door_reso", use "reso" as short part
 	var short_name: String = node.name
 	if node.name.begins_with(gltf_basename + "_"):
 		short_name = node.name.substr((gltf_basename + "_").length())
@@ -49,7 +47,6 @@ func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary, root: No
 	if rid_valid and rid_to_path.has(rid_key):
 		mesh_path = rid_to_path[rid_key]
 	else:
-		# Use deterministic path and overwrite on reimport. idx / RID suffix for same-name, different-mesh collisions.
 		var paths_used: Array = root.get_meta("nexus_resonance_paths_used", [])
 		var mesh_file = base_file + ".res"
 		mesh_path = NexusUtils.ensure_res_path(gltf_dir.path_join(mesh_file))

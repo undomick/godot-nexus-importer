@@ -123,6 +123,8 @@ func _process(_delta):
 		else:
 			return
 
+	_try_report_import_pipeline_finished()
+
 	var batch_locked := NexusBatchLockScript.is_active()
 	if batch_locked:
 		# Close one Nexus tab per frame during batch lock to avoid stale
@@ -197,6 +199,7 @@ func _process(_delta):
 	_try_start_deferred_instance_pass()
 	_try_queue_pending_multimesh_inherited_scenes()
 	_try_queue_pending_composition_inherited_scenes()
+	_try_report_import_pipeline_finished()
 
 
 func _import_system_fully_idle() -> bool:
@@ -219,7 +222,7 @@ func _import_system_fully_idle() -> bool:
 func _ensure_composition_dependencies_ready(level_paths: Array[String]) -> bool:
 	var queued_any := false
 	for level_path in level_paths:
-		if level_path is String and level_path.is_empty():
+		if level_path.is_empty():
 			continue
 		var asset_ids := NexusSceneUtils.collect_asset_ids_from_gltf(level_path)
 		var dep_gltfs := NexusSceneUtils.resolve_dependency_gltf_paths(asset_ids)
@@ -251,9 +254,8 @@ func _ensure_composition_dependencies_ready(level_paths: Array[String]) -> bool:
 	if queued_any:
 		return false
 	for level_path in level_paths:
-		if level_path is String and not level_path.is_empty():
-			if not NexusSceneUtils.composition_dependencies_ready(level_path):
-				return false
+		if not level_path.is_empty() and not NexusSceneUtils.composition_dependencies_ready(level_path):
+			return false
 	return true
 
 
@@ -270,7 +272,7 @@ func _try_start_deferred_instance_pass() -> void:
 	var levels := NexusImportContextScript.take_levels_needing_instance_pass()
 	if not _ensure_composition_dependencies_ready(levels):
 		for level_path in levels:
-			if level_path is String and not level_path.is_empty():
+			if not level_path.is_empty():
 				NexusImportContextScript.mark_level_needs_instance_pass(level_path)
 		return
 
@@ -375,6 +377,24 @@ func _finish_instance_pass() -> void:
 	_queue_post_instance_pass_fixup()
 
 
+func _try_report_import_pipeline_finished() -> void:
+	if not NexusImportContextScript.is_pipeline_completion_pending():
+		return
+	if _instance_pass_running:
+		return
+	if NexusImportContextScript.has_levels_needing_instance_pass():
+		return
+	if not _import_system_fully_idle():
+		return
+	var scene_blocks := _reimport_manager.has_pipeline_completion_blockers(_wrapper_builder)
+	if scene_blocks:
+		return
+	if _composition_scene_queue_pending or _multimesh_scene_queue_pending:
+		return
+	if NexusImportContextScript.try_emit_import_finished(true, false):
+		print_rich("[color=green]Nexus:[/color] Import finished.")
+
+
 func _try_finalize_mass_import_when_idle() -> void:
 	if not NexusImportContextScript.is_mass_import_active():
 		return
@@ -393,6 +413,8 @@ func _try_finalize_mass_import_when_idle() -> void:
 		return
 	if NexusImportContextScript.has_levels_needing_instance_pass():
 		return
+	_composition_scene_queue_pending = false
+	_multimesh_scene_queue_pending = false
 	NexusImportContextScript.set_mass_import_active(false)
 
 
@@ -431,8 +453,8 @@ func _on_resources_reimporting(_resources: PackedStringArray):
 	if _reimport_manager == null:
 		return
 	var gltf_paths := _collect_gltf_paths_from_resources(_resources)
-	# EditorNode already stored instance Node* on this signal. Closing an
-	# inherited or wrapper tab here frees scene_file_path before reload_instances.
+	if not gltf_paths.is_empty() and _editor_bootstrap_done:
+		_reimport_manager.prepare_editor_scenes_for_reimport(gltf_paths)
 	if NexusImportContextScript.is_instance_pass_active():
 		return
 	if NexusImportContextScript.is_composition_resolution_reimport():
@@ -468,13 +490,10 @@ func _batch_is_composition_fs_reimport(gltf_paths: Array) -> bool:
 	var batch_set: Dictionary = {}
 	var has_composition := false
 	for path in gltf_paths:
-		if not path is String:
+		if path.is_empty():
 			continue
-		var p := str(path)
-		if p.is_empty():
-			continue
-		batch_set[p] = true
-		if NexusSceneUtils.is_composition_gltf(p):
+		batch_set[path] = true
+		if NexusSceneUtils.is_composition_gltf(path):
 			has_composition = true
 	if not has_composition:
 		return false
@@ -504,10 +523,11 @@ func _resources_include_multimesh_manifest(resources: PackedStringArray) -> bool
 func _collect_gltf_paths_from_resources(resources: PackedStringArray) -> Array:
 	var gltf_paths: Array = []
 	for resource in resources:
-		if resource is String and not resource.is_empty():
-			var ext := resource.get_extension().to_lower()
-			if ext == "gltf" or ext == "glb":
-				gltf_paths.append(resource)
+		if resource.is_empty():
+			continue
+		var ext := resource.get_extension().to_lower()
+		if ext == "gltf" or ext == "glb":
+			gltf_paths.append(resource)
 	return gltf_paths
 
 
@@ -807,7 +827,7 @@ func _try_queue_pending_multimesh_inherited_scenes() -> void:
 		return
 	if _reimport_manager == null or _wrapper_builder == null:
 		return
-	if _reimport_manager.has_deferred_multimesh_paths():
+	if _reimport_manager.deferred_multimesh_wave_blocks_inherited_queue():
 		return
 	if not _import_system_fully_idle():
 		return
@@ -817,11 +837,9 @@ func _try_queue_pending_multimesh_inherited_scenes() -> void:
 			_wrapper_builder, _reimport_manager
 		)
 	_multimesh_scan_cooldown_frames = 60
+	_multimesh_scene_queue_pending = false
 	if _wrapper_builder.has_pending() or _wrapper_builder.is_busy():
 		return
-	if _reimport_manager.has_pending_inherited_scene_work(_wrapper_builder):
-		return
-	_multimesh_scene_queue_pending = false
 	if queued > 0:
 		print_rich(
 			"[color=cyan]Nexus:[/color] Queued %d MultiMesh inherited scene(s) after reimport."
@@ -834,15 +852,13 @@ func _try_queue_pending_composition_inherited_scenes() -> void:
 		return
 	if _reimport_manager == null or _wrapper_builder == null:
 		return
-	if _reimport_manager.has_deferred_composition_paths():
+	if _reimport_manager.deferred_composition_wave_blocks_inherited_queue():
 		return
-	if _reimport_manager.has_deferred_multimesh_paths():
+	if _reimport_manager.deferred_multimesh_wave_blocks_inherited_queue():
 		return
 	if not _import_system_fully_idle():
 		return
 	var queued := _reimport_manager.queue_composition_inherited_scenes_from_index(_wrapper_builder)
-	if _reimport_manager.has_pending_inherited_scene_work(_wrapper_builder):
-		return
 	_composition_scene_queue_pending = false
 	if queued > 0:
 		print_rich(
@@ -860,9 +876,28 @@ func _apply_stale_catchup(reason: String) -> void:
 		"[color=cyan]Nexus:[/color] %s catch-up: reimporting %d stale indexed glTF(s)."
 		% [reason, gltf_paths.size()]
 	)
-	_reimport_manager.apply_stale_catchup(stale, _wrapper_builder, reason == "Startup")
-	request_multimesh_inherited_scene_queue()
-	request_composition_inherited_scene_queue()
+	_reimport_manager.apply_stale_catchup(stale, _wrapper_builder, false)
+	if reason != "Startup":
+		request_multimesh_inherited_scene_queue()
+		request_composition_inherited_scene_queue()
+
+
+func _clear_stale_import_session_flags() -> void:
+	_composition_scene_queue_pending = false
+	_multimesh_scene_queue_pending = false
+	if _reimport_manager == null:
+		return
+	if (
+		_reimport_manager.has_pending_paths()
+		or _reimport_manager.has_deferred_mass_import_work()
+		or _reimport_manager.has_deferred_composition_paths()
+		or _reimport_manager.has_deferred_multimesh_paths()
+	):
+		return
+	if _wrapper_builder != null and (_wrapper_builder.has_pending() or _wrapper_builder.is_busy()):
+		return
+	if NexusImportContextScript.is_mass_import_active():
+		NexusImportContextScript.set_mass_import_active(false)
 
 
 func _try_startup_import_catchup() -> void:
@@ -875,6 +910,7 @@ func _try_startup_import_catchup() -> void:
 		return
 	if NexusBatchLockScript.is_active():
 		return
+	_clear_stale_import_session_flags()
 	var stale := _reimport_manager.collect_startup_stale_paths()
 	var gltf_paths: Array = stale.get("gltf_paths", [])
 	if gltf_paths.is_empty():

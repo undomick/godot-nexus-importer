@@ -103,10 +103,7 @@ static func _reroll_marker_uuid_if_duplicate(node: Node, seen: Dictionary) -> vo
 	var node_asset := marker_asset_id_from_node(node)
 	var keeper_asset := marker_asset_id_from_node(keeper)
 
-	# The marker carrying the nexus_asset_id is the authoritative keeper. If the
-	# previously seen node lacks an asset_id but the current one has it, swap:
-	# keep the current node's uuid and reroll the previously seen node instead.
-	# This makes the outcome independent of tree traversal order.
+	# Prefer the marker with nexus_asset_id so reroll order does not depend on traversal.
 	if not node_asset.is_empty() and keeper_asset.is_empty():
 		seen[uuid_val] = node
 		_set_marker_asset_id_on_node(keeper, node_asset)
@@ -163,7 +160,6 @@ static func _set_marker_asset_id_on_node(node: Node, asset_id: String) -> void:
 
 
 static func instantiate_scene_reference(scene_path: String) -> Node:
-	## Instantiate a PackedScene while preserving the external scene link (not a baked copy).
 	if scene_path.is_empty() or not ResourceLoader.exists(scene_path):
 		return null
 	var packed_scene = load(scene_path)
@@ -360,8 +356,7 @@ static func resolve_packed_scene_path(candidate: String) -> String:
 	return ""
 
 
-# Per-gltf scene style declared in NEXUS_ASSET_METADATA.scene_style (exported
-# from Blender). Legacy glTFs without scene_style default to wrapper.
+## scene_style from NEXUS_ASSET_METADATA; legacy glTFs default to wrapper.
 static func preferred_scene_style_for_gltf(gltf_path: String) -> String:
 	var declared := ""
 	if NexusUtils.is_gltf_container_path(gltf_path):
@@ -375,12 +370,7 @@ static func preferred_scene_style_for_gltf(gltf_path: String) -> String:
 	return NexusPaths.SCENE_STYLE_WRAPPER
 
 
-# Resolve the Godot scene to instance for a dependency glTF. Unlike
-# resolve_packed_scene_path (which tries the glTF first and is used for raw
-# source/ready checks), this prefers the dependency's derived Godot scene so
-# user edits in the wrapper/inherited scene propagate into compositions and
-# levels. Order: per-gltf declared scene_style scene (NEXUS_ASSET_METADATA),
-# other style scene, *_editable.tscn, *.tscn, finally the glTF as fallback.
+## Dependency scene path: derived .tscn (per scene_style) before glTF fallback.
 static func resolve_instanced_scene_path(gltf_path: String) -> String:
 	if gltf_path.is_empty():
 		return ""
@@ -467,9 +457,7 @@ static func _strip_scene_style_suffix(stem: String) -> String:
 	return stem
 
 
-# Canonical key (dir + stem without scene-style suffix, no extension) so a glTF and
-# its derived *_inherited.tscn / *_wrapper.tscn resolve to the same identity.
-# Slash-normalized and case-folded; do not use as a FileAccess path.
+## Identity key for glTF and derived scene paths (not a filesystem path).
 static func gltf_identity_key(path: String) -> String:
 	if path.is_empty():
 		return ""
@@ -527,22 +515,24 @@ static func resolve_dependency_gltf_paths(asset_ids: Array) -> Array[String]:
 		"asset_index.json",
 		false,
 	)
-	if asset_index.is_empty():
-		return result
 	var seen: Dictionary = {}
 	for asset_id in asset_ids:
 		var id_str := str(asset_id).strip_edges()
 		if id_str.is_empty() or seen.has(id_str):
 			continue
-		if not asset_index.has(id_str):
-			continue
-		var entry = asset_index[id_str]
+		var entry: Dictionary = (
+			asset_index[id_str]
+			if asset_index.has(id_str)
+			else NexusAssetIndexLookup.index_entry_for_asset_id(id_str)
+		)
 		if not entry is Dictionary:
 			continue
 		var rel_path: String = entry.get("relative_path", "")
 		if rel_path.is_empty():
 			continue
 		var gltf_path := NexusUtils.validate_index_path(rel_path)
+		if gltf_path.is_empty():
+			gltf_path = NexusAssetIndexLookup.gltf_path_for_asset_id(id_str)
 		if gltf_path.is_empty() or seen.has(gltf_path):
 			continue
 		seen[gltf_path] = true
@@ -612,9 +602,6 @@ static func composition_dependencies_ready(gltf_path: String) -> bool:
 	if asset_ids.is_empty():
 		return true
 	var dep_gltfs := resolve_dependency_gltf_paths(asset_ids)
-	# Drop any dependency that resolves back to this composition (defensive: the
-	# own-asset_id exclusion above should already handle it, but a stale index entry
-	# could still point a different id at the same glTF).
 	var own_key := gltf_identity_key(gltf_path)
 	var filtered: Array[String] = []
 	for dep in dep_gltfs:
@@ -806,20 +793,14 @@ static func is_gltf_stale_for_catchup(
 	if gltf_mtime > import_mtime:
 		return true
 	var index_hash := str(index_entry.get("content_hash", "")).strip_edges()
-	if not index_hash.is_empty():
-		if NexusImportState.is_unchanged_since_import(gltf_path, index_hash):
-			return false
-		if NexusImportState.has_entry(gltf_path):
-			return true
-		if gltf_mtime <= import_mtime:
-			NexusImportState.mark_imported(gltf_path, index_hash)
-			return false
-		return true
-	if NexusImportState.is_unchanged_since_import(gltf_path, ""):
+	if NexusImportState.is_unchanged_since_import(gltf_path, index_hash):
 		return false
+	# Godot import sidecar is current: not stale even when asset_index.json hash moved.
 	if gltf_mtime <= import_mtime:
-		NexusImportState.mark_imported(gltf_path, "")
+		NexusImportState.mark_imported(gltf_path, index_hash)
 		return false
+	if not index_hash.is_empty() and NexusImportState.has_entry(gltf_path):
+		return true
 	return true
 
 

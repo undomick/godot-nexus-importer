@@ -83,7 +83,7 @@ static func _sanitize_recursive(node: Node, asset_label: String) -> void:
 		var label := asset_label
 		if label.is_empty():
 			label = node.name
-		sanitize_mesh_instance(node as MeshInstance3D, label)
+		sanitize_mesh_instance(node, label)
 	for child in node.get_children():
 		_sanitize_recursive(child, asset_label)
 

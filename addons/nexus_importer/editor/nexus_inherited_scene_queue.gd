@@ -14,7 +14,7 @@ func queue_wrapper_fixup_for_paths(
 		return 0
 	var queued := 0
 	for path in paths:
-		if path is String and NexusSceneUtils.should_create_packed_scene(path):
+		if NexusSceneUtils.should_create_packed_scene(path):
 			if wrapper_builder.needs_scene_processing(path):
 				wrapper_builder.queue_scene(path)
 				queued += 1
@@ -46,23 +46,20 @@ func queue_multimesh_inherited_scenes_from_index(wrapper_builder: NexusWrapperBu
 		paths.append(gltf_path)
 	return queue_multimesh_inherited_scenes_from_paths(wrapper_builder, paths)
 
+func evaluation_has_actionable_work(evaluation: Dictionary) -> bool:
+	return not evaluation.get("ready_to_queue", []).is_empty()
+
+
 func has_pending_inherited_scene_work(wrapper_builder: NexusWrapperBuilder) -> bool:
 	if not NexusPaths.auto_import_enabled():
 		return false
 	var composition_eval := _evaluate_composition_inherited_scene_candidates(wrapper_builder, false)
-	if (
-		not composition_eval.ready_to_queue.is_empty()
-		or not composition_eval.waiting_on_deps.is_empty()
-	):
+	if evaluation_has_actionable_work(composition_eval):
 		return true
 	var multimesh_eval := _evaluate_multimesh_inherited_scene_candidates(
 		wrapper_builder, PackedStringArray(), false
 	)
-	return (
-		not multimesh_eval.ready_to_queue.is_empty()
-		or not multimesh_eval.waiting_on_import.is_empty()
-		or not multimesh_eval.waiting_on_sources.is_empty()
-	)
+	return evaluation_has_actionable_work(multimesh_eval)
 
 func _composition_paths_from_index() -> Array[String]:
 	var asset_index := NexusUtils.load_index_json(

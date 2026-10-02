@@ -45,9 +45,7 @@ static func sanitize_nexus_light_dict(data: Dictionary) -> Dictionary:
 		var gobo: Dictionary = out["gobo"].duplicate(true)
 		var gobo_mode := str(gobo.get("mode", ""))
 		if gobo_mode == "projector" and not _shadow_enabled(out):
-			if light_type == "point":
-				gobo["skip_projector"] = true
-			elif light_type == "area":
+			if light_type in ["point", "area"]:
 				gobo["skip_projector"] = true
 		out["gobo"] = gobo
 

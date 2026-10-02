@@ -4,7 +4,7 @@ extends Object
 func process(node: Node, meta: Dictionary) -> void:
 	if not node is MeshInstance3D or not is_instance_valid(node.mesh):
 		return
-		
+
 	if not meta.has("nexus_color_attributes"):
 		return
 	
@@ -16,11 +16,10 @@ func process(node: Node, meta: Dictionary) -> void:
 			continue
 		var mapping = settings.get("mapping")
 		var blender_name = settings.get("blender_name", "Unknown")
-		var channel_index = settings.get("gltf_channel_index", -1) # 0 = COLOR_0
-		
-		if channel_index == -1: continue
+		var channel_index = settings.get("gltf_channel_index", -1)
+		if channel_index == -1:
+			continue
 
-		# Shader attribute name for info output
 		var shader_attribute = "COLOR" if channel_index == 0 else "COLOR" + str(channel_index + 1)
 
 		match mapping:

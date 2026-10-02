@@ -73,10 +73,6 @@ func _resolve_bone_offset(
 	bone_idx: int,
 	meta: Dictionary
 ) -> Transform3D:
-	# Reconstruct the bone-relative offset in skeleton-local space from the node's
-	# actual world transform and the bone rest. This is frame-agnostic: the exporter
-	# only provides the node's world TRS (via the glTF node) and the bone name, so no
-	# B2G/conversion assumptions are baked in. node.world = skel_world @ bone_rest @ offset.
 	var node_world := NexusTransformSanitize.sanitize(
 		_get_node_world_transform(node, root, meta), str(node.name)
 	)

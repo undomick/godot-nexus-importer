@@ -238,11 +238,14 @@ func _load_asset_index_entry(source_asset_id: String) -> Dictionary:
 				"Nexus MultiMesh: Asset index missing at '%s'." % NexusPaths.asset_index_path()
 			)
 		return {}
-	if not asset_index.has(source_asset_id):
+	var entry: Dictionary = (
+		asset_index[source_asset_id]
+		if asset_index.has(source_asset_id)
+		else NexusAssetIndexLookup.index_entry_for_asset_id(source_asset_id)
+	)
+	if entry.is_empty():
 		push_error("Nexus MultiMesh: Source Asset ID '%s' not found." % source_asset_id)
 		return {}
-
-	var entry = asset_index[source_asset_id]
 	if not entry is Dictionary:
 		push_error("Nexus MultiMesh: Invalid index entry for Asset ID '%s'." % source_asset_id)
 		return {}
@@ -270,7 +273,7 @@ func _collect_lod_layers(source_scene_path: String) -> Dictionary:
 	if not packed_scene is PackedScene:
 		return {"layers": [], "error": "Source Load Failed"}
 
-	var temp_instance = (packed_scene as PackedScene).instantiate()
+	var temp_instance = packed_scene.instantiate()
 	var mesh_nodes: Array[MeshInstance3D] = []
 	_collect_mesh_instances_recursive(temp_instance, mesh_nodes)
 	if mesh_nodes.is_empty():
@@ -354,8 +357,7 @@ func _compare_lod_layers(a: Dictionary, b: Dictionary) -> bool:
 
 func _apply_visibility_range_from_source(target: GeometryInstance3D, range_data: Dictionary) -> void:
 	if target is MultiMeshInstance3D:
-		var mmi := target as MultiMeshInstance3D
-		if mmi.multimesh == null or mmi.multimesh.mesh == null:
+		if target.multimesh == null or target.multimesh.mesh == null:
 			return
 	NexusVisibilityRange.apply_multimesh_lod_from_dict(target, range_data)
 

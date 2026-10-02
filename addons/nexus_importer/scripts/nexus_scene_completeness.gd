@@ -54,9 +54,10 @@ static func scene_is_complete(gltf_path: String, tscn_path: String) -> bool:
 	if not FileAccess.file_exists(tscn_path) or not ResourceLoader.exists(tscn_path):
 		return false
 
-	var packed := ResourceLoader.load(tscn_path, "", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
-	if packed == null:
+	var resource: Resource = ResourceLoader.load(tscn_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	if not resource is PackedScene:
 		return false
+	var packed: PackedScene = resource
 	var root: Node = packed.instantiate()
 	if root == null:
 		return false

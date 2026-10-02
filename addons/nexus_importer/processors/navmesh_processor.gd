@@ -74,5 +74,5 @@ func _collect_mesh_instances(node: Node) -> Array[MeshInstance3D]:
 	for child in node.get_children():
 		result.append_array(_collect_mesh_instances(child))
 	if node is MeshInstance3D:
-		result.append(node as MeshInstance3D)
+		result.append(node)
 	return result

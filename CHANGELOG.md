@@ -2,7 +2,42 @@
 
 All notable changes to the Nexus Pipeline (Blender → Godot) are documented here.
 
-## [Unreleased]
+## [2.2.0] - 2026-10-02
+
+### Blender Addon (nexus_b2g)
+
+- Meshoptimizer extracted from Advanced Options to its own section. Added Live Mesh Optimization preview in the viewport.
+- Bundled gltfpack 1.3 for mesh optimization.
+- Re-newed **Project Settings** dialog for scene style and export-related project settings. (Under Project Path Section)
+- UI polish in the Nexus tab and panels.
+
+### Godot Addon (nexus_importer)
+
+- Fixed editor crash when manually reimporting glTF while inherited or wrapper scene tabs stayed open.
+- Re-export/reimport no longer closes open inherited or wrapper scene tabs.
+
+## [2.1.5] - 2026-08-23
+
+### Blender Addon (nexus_b2g)
+
+- Outliner: valid collections keep their color tag (no more forced white).
+- Hierarchy errors only overlay red; the previous color returns after the fix.
+
+## [2.1.4] - 2026-08-22
+
+### Blender Addon (nexus_b2g)
+
+- Duplicate Asset IDs in the same `.blend` are resolved automatically: the canonical collection keeps its id, copies get a new UUID (on load, property edits, and export). **Regenerate Asset ID** is available in Collection Settings. Re-export affected assets after upgrading.
+
+## [2.1.3] - 2026-08-22
+
+### Blender Addon (nexus_b2g)
+
+- Moving the Origin Pivot automatically updates collection instances in the viewport after you finish the move.
+
+### Godot Addon (nexus_importer)
+
+- No longer crashes when closing open Nexus asset tabs during batch export (focus and close are split across frames; nested close is ignored).
 
 ## [2.1.2] - 2026-08-19
 

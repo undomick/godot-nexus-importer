@@ -23,10 +23,6 @@ static func sanitize(transform: Transform3D, label: String = "") -> Transform3D:
 	return Transform3D(safe_basis, safe_origin)
 
 
-# Walk the imported scene once and neutralize any Node3D transform that would
-# feed NaN/Inf or a singular basis into Godot's rendering/physics math
-# (light culler, physics planes, affine_inverse). Valid finite non-singular
-# transforms pass through unchanged on the fast path inside sanitize().
 static func sanitize_scene_transforms(root: Node) -> int:
 	return _sanitize_transforms_recursive(root)
 

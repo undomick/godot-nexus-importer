@@ -28,8 +28,6 @@ func _popup_menu(paths: PackedStringArray) -> void:
 	if has_folder:
 		add_context_menu_item("Create Nexus Wrapper Scenes (Recursive)", _on_create_wrapper_folder)
 		add_context_menu_item("Create Nexus Inherited Scenes (Recursive)", _on_create_inherited_folder)
-	if not has_gltf and not has_folder:
-		return
 
 func _on_create_wrapper(paths: Array) -> void:
 	_queue_for_scene_type(paths, "wrapper")

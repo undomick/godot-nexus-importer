@@ -152,6 +152,8 @@ func is_blocking_scene_creation() -> bool:
 func prepare_editor_scenes_for_reimport(gltf_paths: Array) -> void:
 	if gltf_paths.is_empty():
 		return
+	if _plugin == null or not is_instance_valid(_plugin):
+		return
 	var ei = _plugin.get_editor_interface()
 	if ei == null:
 		return
@@ -508,10 +510,56 @@ func queue_multimesh_inherited_scenes_from_index(wrapper_builder: NexusWrapperBu
 func has_pending_inherited_scene_work(wrapper_builder: NexusWrapperBuilder) -> bool:
 	return _inherited_scenes.has_pending_inherited_scene_work(wrapper_builder)
 
-func has_pending_composition_scene_work(wrapper_builder: NexusWrapperBuilder) -> bool:
+func has_pipeline_completion_blockers(wrapper_builder: NexusWrapperBuilder) -> bool:
+	if has_pending_inherited_scene_work(wrapper_builder):
+		return true
 	if has_deferred_composition_paths() or has_deferred_multimesh_paths():
 		return true
-	return has_pending_inherited_scene_work(wrapper_builder)
+	if _deferred_composition_paths_ready_for_wave():
+		return true
+	if _deferred_multimesh_paths_ready_for_wave():
+		return true
+	return false
+
+func deferred_composition_wave_blocks_inherited_queue() -> bool:
+	return deferred_composition_wave_has_ready_paths()
+
+func deferred_composition_wave_has_ready_paths() -> bool:
+	return _deferred_composition_paths_ready_for_wave()
+
+func deferred_multimesh_wave_blocks_inherited_queue() -> bool:
+	return _deferred_multimesh_paths_ready_for_wave()
+
+func _deferred_composition_paths_ready_for_wave() -> bool:
+	if _deferred_composition_gltf_paths.is_empty():
+		return false
+	var hold_levels := not _deferred_multimesh_paths.is_empty()
+	for path in _deferred_composition_gltf_paths:
+		var canonical := NexusUtils.to_res_gltf_path(path)
+		if canonical.is_empty():
+			canonical = path
+		if NexusImportState.is_build_aborted(canonical):
+			continue
+		if hold_levels and NexusSceneUtils.is_level_gltf(canonical):
+			continue
+		if NexusSceneUtils.composition_dependencies_ready(canonical):
+			return true
+	return false
+
+
+func _deferred_multimesh_paths_ready_for_wave() -> bool:
+	if _deferred_multimesh_paths.is_empty():
+		return false
+	for path in _deferred_multimesh_paths:
+		var canonical := NexusUtils.to_res_gltf_path(path)
+		if canonical.is_empty():
+			canonical = path
+		if NexusImportState.is_build_aborted(canonical):
+			continue
+		var sources_ready := NexusMultiMeshUtils.multimesh_sources_ready(canonical)
+		if sources_ready.get("ok", false):
+			return true
+	return false
 
 func fix_import_config_if_needed(gltf_path: String, do_write: bool = true) -> bool:
 	return _config_fixer.fix_import_config_if_needed(gltf_path, do_write)
@@ -744,9 +792,13 @@ func queue_paths(paths: Array) -> void:
 	if NexusBatchLock.is_active():
 		NexusBatchLock.defer_paths(paths)
 		return
+	var queued_work := false
 	for p in paths:
 		if p is String:
 			_route_path_to_queue(p)
+			queued_work = true
+	if queued_work:
+		NexusImportContext.note_pipeline_work_started()
 	_sort_gltf_queue()
 	if _reimport_phase == PHASE_IDLE:
 		_reimport_phase = _initial_reimport_phase()
@@ -756,13 +808,18 @@ func queue_phased_paths(texture_paths: Array, gltf_paths: Array) -> void:
 		NexusBatchLock.defer_paths(texture_paths)
 		NexusBatchLock.defer_paths(gltf_paths)
 		return
+	var queued_work := false
 	for p in texture_paths:
 		if p is String and p not in _texture_paths:
 			_texture_paths.append(p)
+			queued_work = true
 	for p in gltf_paths:
 		if not p is String:
 			continue
 		_route_gltf_path_to_queue(p)
+		queued_work = true
+	if queued_work:
+		NexusImportContext.note_pipeline_work_started()
 	_sort_gltf_queue()
 	if _reimport_phase == PHASE_IDLE:
 		_reimport_phase = _initial_reimport_phase()
@@ -841,6 +898,8 @@ func collect_stale_paths(candidates: Array[String], asset_index: Dictionary) -> 
 			continue
 		if not FileAccess.file_exists(canonical):
 			continue
+		if NexusImportState.is_build_aborted(canonical):
+			continue
 		var index_entry: Dictionary = {}
 		for asset_id in asset_index.keys():
 			var entry = asset_index[asset_id]
@@ -856,12 +915,16 @@ func collect_stale_paths(candidates: Array[String], asset_index: Dictionary) -> 
 		if NexusSceneUtils.is_gltf_stale_for_catchup(canonical, index_entry):
 			seen[canonical] = true
 			stale_paths.append(canonical)
-		# Missing packed scene must recreate even when the glTF itself is current.
+			continue
+		# Missing or incomplete packed scene must recreate when the glTF itself is current.
 		if NexusSceneUtils.should_create_packed_scene(canonical):
 			var startup_tscn := NexusPaths.scene_path_for(
 				canonical, NexusSceneUtils.preferred_scene_style_for_gltf(canonical)
 			)
-			if not FileAccess.file_exists(startup_tscn) and not seen.has(canonical):
+			if not FileAccess.file_exists(startup_tscn):
+				seen[canonical] = true
+				stale_paths.append(canonical)
+			elif not NexusSceneCompleteness.scene_is_complete(canonical, startup_tscn):
 				seen[canonical] = true
 				stale_paths.append(canonical)
 	return stale_paths
@@ -952,6 +1015,7 @@ func apply_stale_catchup(
 	var gltf_paths: Array = stale.get("gltf_paths", [])
 	if gltf_paths.is_empty():
 		return false
+	NexusImportContext.note_pipeline_work_started()
 
 	if use_mass_import:
 		queue_phased_reimport_from_gltf_paths([], gltf_paths)
@@ -1288,7 +1352,3 @@ func _request_composition_wave() -> void:
 func _is_texture_path(path: String) -> bool:
 	var ext = path.get_extension().to_lower()
 	return ext in ["png", "jpg", "jpeg", "webp"]
-
-func _is_gltf_path(path: String) -> bool:
-	var ext = path.get_extension().to_lower()
-	return ext == "gltf" or ext == "glb"

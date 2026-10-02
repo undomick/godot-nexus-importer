@@ -63,8 +63,68 @@ static func mark_imported(gltf_path: String, index_content_hash: String = "") ->
 		"last_import_mtime": FileAccess.get_modified_time(gltf_path),
 		"last_content_hash": str(index_content_hash).strip_edges(),
 	}
+	_clear_build_abort_fields(canonical)
 	_dirty = true
 	_save_if_dirty()
+
+
+static func mark_build_aborted(gltf_path: String, reason: String = "") -> void:
+	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
+		return
+	_ensure_loaded()
+	var canonical := _canonical_path(gltf_path)
+	if canonical.is_empty():
+		return
+	var entry: Dictionary = _entries.get(canonical, {})
+	if not entry is Dictionary:
+		entry = {}
+	entry["last_import_mtime"] = entry.get("last_import_mtime", FileAccess.get_modified_time(gltf_path))
+	entry["last_content_hash"] = str(entry.get("last_content_hash", ""))
+	entry["build_aborted_mtime"] = FileAccess.get_modified_time(gltf_path)
+	var trimmed := str(reason).strip_edges()
+	if not trimmed.is_empty():
+		entry["build_abort_reason"] = trimmed
+	_entries[canonical] = entry
+	_dirty = true
+	_save_if_dirty()
+
+
+static func is_build_aborted(gltf_path: String) -> bool:
+	if gltf_path.is_empty() or not FileAccess.file_exists(gltf_path):
+		return false
+	var entry := get_entry(gltf_path)
+	if not entry.has("build_aborted_mtime"):
+		return false
+	var locked_mtime := int(entry.get("build_aborted_mtime", -1))
+	if FileAccess.get_modified_time(gltf_path) != locked_mtime:
+		clear_build_abort(gltf_path)
+		return false
+	return true
+
+
+static func clear_build_abort(gltf_path: String) -> void:
+	_ensure_loaded()
+	var canonical := _canonical_path(gltf_path)
+	if canonical.is_empty() or not _entries.has(canonical):
+		return
+	if not _clear_build_abort_fields(canonical):
+		return
+	_dirty = true
+	_save_if_dirty()
+
+
+static func _clear_build_abort_fields(canonical: String) -> bool:
+	if not _entries.has(canonical):
+		return false
+	var entry = _entries[canonical]
+	if not entry is Dictionary:
+		return false
+	if not entry.has("build_aborted_mtime") and not entry.has("build_abort_reason"):
+		return false
+	entry.erase("build_aborted_mtime")
+	entry.erase("build_abort_reason")
+	_entries[canonical] = entry
+	return true
 
 
 static func is_unchanged_since_import(gltf_path: String, index_content_hash: String = "") -> bool:

@@ -3,7 +3,7 @@ extends Object
 
 func process(node: Node, node_meta: Dictionary, scene_meta: Dictionary) -> void:
 	_process_visibility(node, node_meta)
-	
+
 	if node is GeometryInstance3D:
 		_process_shadow_casting(node, node_meta)
 		_process_gi_mode(node, node_meta, scene_meta)

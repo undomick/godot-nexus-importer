@@ -79,7 +79,13 @@ func _post_import(scene: Node) -> Object:
 		return routed
 
 	_process_scene_tree(scene, scene_meta, gltf_path, export_type)
-	_log_import_summary(scene.name, export_type, root_type, scene_meta)
+	_print_compact_summary(
+		scene.name,
+		export_type,
+		root_type,
+		scene_meta,
+		str(scene_meta.get("_summary_gltf_path", ""))
+	)
 
 	return scene
 
@@ -140,7 +146,7 @@ func _process_scene_tree(
 	scene.set_meta("_nexus_gltf_path", gltf_path)
 	instancing_processor.reset_import_budget()
 	NexusSceneUtils.inject_nexus_node_extras_from_gltf(scene, gltf_path)
-	var swap_nexus_materials := _should_swap_nexus_materials(scene_meta)
+	var swap_nexus_materials := NexusUtils.should_swap_nexus_materials(scene_meta)
 	if swap_nexus_materials:
 		NexusSceneUtils.inject_nexus_material_extras_from_gltf(scene, gltf_path)
 	NexusSceneUtils.reroll_duplicate_uuid_markers(scene)
@@ -184,10 +190,6 @@ func _extract_animations_if_needed(
 	stats.anims = anim_stats.extracted
 	if anim_stats.extracted > 0 and not anim_stats.path.is_empty():
 		scene.set_meta("nexus_anim_lib_path", anim_stats.path)
-
-func _log_import_summary(name: String, export_type: String, root_type: String, meta: Dictionary) -> void:
-	var gltf_path: String = str(meta.get("_summary_gltf_path", ""))
-	_print_compact_summary(name, export_type, root_type, meta, gltf_path)
 
 func _remove_legacy_lod_deferred_nodes(root: Node) -> void:
 	var stack: Array = [root]
@@ -286,10 +288,6 @@ func _externalize_gltf_materials_walk(
 	material_processor.externalize_embedded(node, gltf_path, stats)
 	for child in node.get_children():
 		_externalize_gltf_materials_walk(child, gltf_path, nodes_under_instance)
-
-func _should_swap_nexus_materials(scene_meta: Dictionary) -> bool:
-	# Typical GLB embeds real materials; keep them instead of swapping to .tres.
-	return NexusUtils.should_swap_nexus_materials(scene_meta)
 
 func _apply_animation_settings(scene: Node, meta: Dictionary) -> void:
 	var anim_player = NexusSceneUtils.find_animation_player(scene)

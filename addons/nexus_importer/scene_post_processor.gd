@@ -10,8 +10,8 @@ func _get_option_visibility(path, for_animation, option):
 func _post_process(scene: Node) -> void:
 	if NexusBatchLock.is_active():
 		var locked_path = get_option_value("internal_nexus_path")
-		if locked_path is String and not str(locked_path).is_empty():
-			NexusBatchLock.defer_path(str(locked_path))
+		if locked_path is String and not locked_path.is_empty():
+			NexusBatchLock.defer_path(locked_path)
 		return
 
 	var gltf_path = get_option_value("internal_nexus_path")
@@ -22,4 +22,4 @@ func _post_process(scene: Node) -> void:
 		var groups = scene_meta["godot_groups"]
 		if groups is Array:
 			for group in groups:
-				scene.add_to_group(group, true) # true = persistent
+				scene.add_to_group(group, true)

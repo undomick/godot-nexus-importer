@@ -13,7 +13,7 @@ const SCENE_LOAD_WAIT_FRAMES = 3
 const INHERITED_OPEN_ATTEMPTS = 5
 const INHERITED_OPEN_WAIT_FRAMES_PER_ATTEMPT = 60
 # Max forced non-deferred reimports for unresolved composition placeholders.
-const MAX_PLACEHOLDER_REIMPORT_RETRIES = 2
+const MAX_PLACEHOLDER_REIMPORT_RETRIES = 1
 # Abort after this many open timeouts so the re-queue loop cannot spin forever.
 const MAX_INHERITED_OPEN_TIMEOUTS = 2
 const MAX_BUILD_RETRIES = 3
@@ -74,13 +74,16 @@ func queue_scene(gltf_path: String, scene_type: String = "") -> bool:
 		return false
 	if NexusBatchLock.is_active():
 		NexusBatchLock.defer_path(gltf_path)
+		NexusImportContext.note_pipeline_work_started()
 		return true
 	var queued := NexusUtils.dict_bind_path(_queue, gltf_path)
 	if _queue.has(queued):
 		if explicit_style:
 			_queue[queued] = scene_type
+		NexusImportContext.note_pipeline_work_started()
 		return true
 	_queue[queued] = scene_type
+	NexusImportContext.note_pipeline_work_started()
 	return true
 
 func _multimesh_scene_queue_allowed(gltf_path: String) -> bool:
@@ -184,42 +187,33 @@ func needs_scene_processing(gltf_path: String) -> bool:
 	if NexusImportContext.is_mass_import_active() and NexusSceneUtils.is_composition_gltf(gltf_path):
 		return false
 
-	if NexusImportContext.is_mass_import_active():
-		if export_type == "MULTIMESH_MANIFEST":
-			var import_ready := NexusMultiMeshUtils.multimesh_import_ready(gltf_path)
-			return not import_ready.get("ok", false) or not FileAccess.file_exists(tscn_path)
-		# Recreate when glTF is newer than the saved scene (batch-lock re-exports).
-		if not FileAccess.file_exists(tscn_path):
-			return true
-		var gltf_mtime := FileAccess.get_modified_time(gltf_path)
-		var tscn_mtime := FileAccess.get_modified_time(tscn_path)
-		return gltf_mtime > tscn_mtime
-
-	if NexusSceneUtils.is_composition_gltf(gltf_path) and FileAccess.file_exists(tscn_path):
-		var gltf_mtime := FileAccess.get_modified_time(gltf_path)
-		var tscn_mtime := FileAccess.get_modified_time(tscn_path)
-		if gltf_mtime > tscn_mtime:
-			return true
-
-	if not FileAccess.file_exists(tscn_path):
-		return true
-
-	if str(meta.get("export_type", "")) == "MULTIMESH_MANIFEST":
+	if export_type == "MULTIMESH_MANIFEST":
 		var import_ready := NexusMultiMeshUtils.multimesh_import_ready(gltf_path)
 		if not import_ready.get("ok", false):
 			return true
 		if not FileAccess.file_exists(tscn_path):
 			return true
 
-	# Recreate when glTF is newer than the saved scene (FS re-export path).
-	var reg_gltf_mtime := FileAccess.get_modified_time(gltf_path)
-	var reg_tscn_mtime := FileAccess.get_modified_time(tscn_path)
-	if reg_gltf_mtime > reg_tscn_mtime:
+	if not FileAccess.file_exists(tscn_path):
 		return true
 
-	return not NexusSceneCompleteness.scene_is_complete(gltf_path, tscn_path)
+	if not NexusSceneCompleteness.scene_is_complete(gltf_path, tscn_path):
+		return true
+	if _needs_material_refresh(gltf_path, tscn_path, export_type):
+		return true
+	return false
+
+
+func _needs_material_refresh(gltf_path: String, tscn_path: String, export_type: String) -> bool:
+	if export_type == "MULTIMESH_MANIFEST":
+		return false
+	if NexusImportContext.is_mass_import_active() or NexusBatchLock.is_active():
+		return false
+	return not NexusMultiMeshUtils.packed_scene_materials_ready(tscn_path, gltf_path)
 
 func _is_build_retry_exhausted(gltf_path: String) -> bool:
+	if NexusImportState.is_build_aborted(gltf_path):
+		return true
 	var key := NexusUtils.dict_find_path_key(_build_retry_exhausted, gltf_path)
 	if gltf_path.is_empty() or key.is_empty():
 		return false
@@ -247,6 +241,7 @@ func reset_build_retries(gltf_path: String) -> void:
 	var exhausted_key := NexusUtils.dict_find_path_key(_build_retry_exhausted, gltf_path)
 	if not exhausted_key.is_empty():
 		_build_retry_exhausted.erase(exhausted_key)
+	NexusImportState.clear_build_abort(gltf_path)
 	NexusSceneCompleteness.invalidate(gltf_path)
 
 func _schedule_build_retry_or_exhaust(gltf_path: String, tscn_path: String) -> void:
@@ -268,6 +263,10 @@ func _schedule_build_retry_or_exhaust(gltf_path: String, tscn_path: String) -> v
 	var mtime := FileAccess.get_modified_time(gltf_path) if FileAccess.file_exists(gltf_path) else -1
 	var exhausted_key := NexusUtils.dict_bind_path(_build_retry_exhausted, gltf_path)
 	_build_retry_exhausted[exhausted_key] = mtime
+	NexusImportState.mark_build_aborted(
+		gltf_path,
+		"incomplete scene after %d build attempt(s)" % MAX_BUILD_RETRIES
+	)
 	push_error(
 		"Nexus: Scene '%s' still incomplete after %d build attempt(s); waiting for glTF change."
 		% [tscn_path.get_file(), MAX_BUILD_RETRIES]
@@ -559,15 +558,20 @@ func clear_inherited_abort(gltf_path: String) -> void:
 		_placeholder_retry_counts.erase(retry_key)
 	reset_build_retries(gltf_path)
 
-func mark_inherited_aborted(gltf_path: String) -> void:
+func mark_inherited_aborted(gltf_path: String, reason: String = "") -> void:
 	if gltf_path.is_empty():
 		return
 	var abort_key := NexusUtils.dict_bind_path(_inherited_aborted, gltf_path)
 	_inherited_aborted[abort_key] = true
+	NexusImportState.mark_build_aborted(gltf_path, reason)
 	NexusSceneCompleteness.invalidate(gltf_path)
 
 func is_inherited_aborted(gltf_path: String) -> bool:
-	return not gltf_path.is_empty() and not NexusUtils.dict_find_path_key(_inherited_aborted, gltf_path).is_empty()
+	if gltf_path.is_empty():
+		return false
+	if not NexusUtils.dict_find_path_key(_inherited_aborted, gltf_path).is_empty():
+		return true
+	return NexusImportState.is_build_aborted(gltf_path)
 
 func _request_multimesh_inherited_scene_queue() -> void:
 	if _plugin and _plugin.has_method("request_multimesh_inherited_scene_queue"):
@@ -850,7 +854,7 @@ func _has_physics_body_recursive(node: Node) -> bool:
 	return false
 
 func _abort_composition_inherited_for_placeholders(gltf_path: String, reason: String) -> void:
-	mark_inherited_aborted(gltf_path)
+	mark_inherited_aborted(gltf_path, reason)
 	var retry_key := NexusUtils.dict_find_path_key(_placeholder_retry_counts, gltf_path)
 	if not retry_key.is_empty():
 		_placeholder_retry_counts.erase(retry_key)

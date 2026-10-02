@@ -54,9 +54,8 @@ func _wrap_nested_group(scene: Node, boundary: Node, stats: Dictionary) -> void:
 	parent.add_child(wrapper)
 	parent.move_child(wrapper, insert_index)
 	wrapper.owner = scene.owner if scene.owner else scene
-	# Wrapper is a physics/type container only; member glTF transforms stay on children.
 	if wrapper is Node3D:
-		(wrapper as Node3D).transform = Transform3D.IDENTITY
+		wrapper.transform = Transform3D.IDENTITY
 
 	var wrapper_meta := {
 		"root_type": str(meta.get("nexus_nested_root_type", "NODE_3D")),
@@ -80,7 +79,7 @@ func _wrap_nested_group(scene: Node, boundary: Node, stats: Dictionary) -> void:
 			continue
 		if not member is Node3D:
 			continue
-		_reparent_member_under_wrapper(scene, wrapper, member as Node3D)
+		_reparent_member_under_wrapper(scene, wrapper, member)
 
 	if wrapper_meta.get("root_type", "") == "VEHICLE":
 		wrapper = _root_processor.ensure_vehicle_body_root(wrapper, wrapper_meta)
@@ -100,8 +99,7 @@ func _reparent_member_under_wrapper(scene: Node, wrapper: Node, member_3d: Node3
 	member_3d.owner = null
 	wrapper.add_child(member_3d)
 	if wrapper is Node3D:
-		var wrapper_3d := wrapper as Node3D
-		var wrapper_global := NexusTransformSanitize.composed_global_transform(wrapper_3d)
+		var wrapper_global := NexusTransformSanitize.composed_global_transform(wrapper)
 		member_3d.transform = wrapper_global.affine_inverse() * member_global
 	member_3d.owner = scene.owner if scene.owner else scene
 

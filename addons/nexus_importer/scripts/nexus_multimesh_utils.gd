@@ -32,9 +32,6 @@ static func multimesh_sources_ready(gltf_path: String) -> Dictionary:
 		"asset_index.json",
 		false,
 	)
-	if asset_index.is_empty():
-		result.reason = "asset_index.json missing or unreadable"
-		return result
 
 	var missing: PackedStringArray = []
 	for source_entry in sources:
@@ -45,15 +42,21 @@ static func multimesh_sources_ready(gltf_path: String) -> Dictionary:
 		if source_asset_id.is_empty():
 			missing.append(source_name if not source_name.is_empty() else "?")
 			continue
-		if not asset_index.has(source_asset_id):
+		var entry: Dictionary = (
+			asset_index[source_asset_id]
+			if asset_index.has(source_asset_id)
+			else NexusAssetIndexLookup.index_entry_for_asset_id(source_asset_id)
+		)
+		if entry.is_empty():
 			missing.append(source_name)
 			continue
-		var entry = asset_index[source_asset_id]
 		if not entry is Dictionary:
 			missing.append(source_name)
 			continue
 		var rel_path: String = entry.get("relative_path", "")
 		var base_gltf_path := NexusUtils.validate_index_path(rel_path)
+		if base_gltf_path.is_empty():
+			base_gltf_path = NexusAssetIndexLookup.gltf_path_for_asset_id(source_asset_id)
 		if base_gltf_path.is_empty():
 			missing.append(source_name)
 			continue
@@ -277,12 +280,20 @@ static func multimesh_expected_res_paths(gltf_path: String) -> Array[String]:
 			continue
 		var source_asset_id := str(source_entry.get("source_asset_id", "")).strip_edges()
 		var source_name := str(source_entry.get("source_name", source_asset_id))
-		if source_asset_id.is_empty() or not asset_index.has(source_asset_id):
+		if source_asset_id.is_empty():
 			continue
-		var entry = asset_index[source_asset_id]
+		var entry: Dictionary = (
+			asset_index[source_asset_id]
+			if asset_index.has(source_asset_id)
+			else NexusAssetIndexLookup.index_entry_for_asset_id(source_asset_id)
+		)
+		if entry.is_empty():
+			continue
 		if not entry is Dictionary:
 			continue
 		var base_gltf_path := NexusUtils.validate_index_path(str(entry.get("relative_path", "")))
+		if base_gltf_path.is_empty():
+			base_gltf_path = NexusAssetIndexLookup.gltf_path_for_asset_id(source_asset_id)
 		if base_gltf_path.is_empty():
 			continue
 		var source_scene_path := NexusSceneUtils.resolve_packed_scene_path(base_gltf_path)
@@ -371,10 +382,13 @@ static func _source_scene_has_mesh_instances(source_scene_path: String) -> bool:
 	return found
 
 
+static func packed_scene_materials_ready(scene_path: String, gltf_path: String = "") -> bool:
+	return _source_scene_materials_ready(scene_path, gltf_path, true)
+
+
 static func _source_scene_materials_ready(
-	source_scene_path: String, source_gltf_path: String = ""
+	source_scene_path: String, source_gltf_path: String = "", vacuous_when_no_mesh: bool = false
 ) -> bool:
-	## True when surfaces have materials; Nexus pipeline requires external .tres/.material (swap done).
 	var inst: Node = _instantiate_packed_scene(source_scene_path)
 	if inst == null:
 		return false
@@ -382,7 +396,7 @@ static func _source_scene_materials_ready(
 	_collect_mesh_instances_for_probe(inst, mesh_nodes)
 	if mesh_nodes.is_empty():
 		inst.free()
-		return false
+		return vacuous_when_no_mesh
 	var meta_path := source_gltf_path if not source_gltf_path.is_empty() else source_scene_path
 	var scene_meta := NexusUtils.get_nexus_metadata(meta_path)
 	var require_external_tres := NexusUtils.should_swap_nexus_materials(scene_meta)

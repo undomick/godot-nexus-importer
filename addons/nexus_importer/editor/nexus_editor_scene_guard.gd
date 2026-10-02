@@ -8,6 +8,12 @@ extends RefCounted
 
 const SCENE_SWITCH_SETTLE_FRAMES := 2
 
+const TAB_KIND_UNRELATED := &"unrelated"
+const TAB_KIND_WRAPPER := &"wrapper"
+const TAB_KIND_INHERITED := &"inherited"
+const TAB_KIND_INSTANCED := &"instanced"
+const TAB_KIND_AMBIGUOUS := &"ambiguous"
+
 static var _busy: bool = false
 
 
@@ -54,16 +60,104 @@ static func manual_reimport_scene_plan(edited_path: String, gltf_path: String) -
 	}
 
 
-static func paths_closed_on_gltf_refresh(open_paths: Array) -> Array[String]:
+static func _tab_path_matches(path_a: String, path_b: String) -> bool:
+	if path_a.is_empty() or path_b.is_empty():
+		return false
+	var a := path_a.replace("\\", "/").strip_edges()
+	var b := path_b.replace("\\", "/").strip_edges()
+	if a == b:
+		return true
+	return NexusUtils.path_identity_key(a) == NexusUtils.path_identity_key(b)
+
+
+static func _is_imported_gltf_sidecar_tab(tab_path: String, gltf_path: String) -> bool:
+	if tab_path.find(".godot/imported/") < 0:
+		return false
+	if tab_path.get_extension().to_lower() != "scn":
+		return false
+	var stem := gltf_path.get_file().get_basename()
+	return not stem.is_empty() and tab_path.find(stem) >= 0
+
+
+## Classify an open editor tab for a glTF being reimported.
+## Wrapper and inherited Nexus scenes stay open; raw glTF / import-cache tabs close.
+## Unrecognized related .tscn paths are ambiguous and must not be closed.
+static func classify_open_scene_tab(open_tab_path: String, gltf_path: String) -> StringName:
+	var tab := str(open_tab_path).replace("\\", "/").strip_edges()
+	var gltf := NexusUtils.to_res_gltf_path(gltf_path)
+	if gltf.is_empty():
+		gltf = str(gltf_path).replace("\\", "/").strip_edges()
+	if tab.is_empty() or gltf.is_empty():
+		return TAB_KIND_UNRELATED
+
+	var wrapper := NexusPaths.wrapper_path_for(gltf)
+	var inherited := NexusPaths.inherited_path_for(gltf)
+	if _tab_path_matches(tab, wrapper):
+		return TAB_KIND_WRAPPER
+	if _tab_path_matches(tab, inherited):
+		return TAB_KIND_INHERITED
+
+	if not _open_tab_related_to_gltf(tab, gltf):
+		return TAB_KIND_UNRELATED
+
+	var ext := tab.get_extension().to_lower()
+	if ext == "gltf" or ext == "glb" or ext == "scn":
+		return TAB_KIND_INSTANCED
+	return TAB_KIND_AMBIGUOUS
+
+
+static func _open_tab_related_to_gltf(tab: String, gltf: String) -> bool:
+	if _tab_path_matches(tab, gltf):
+		return true
+	if NexusSceneUtils.gltf_identity_key(tab) == NexusSceneUtils.gltf_identity_key(gltf):
+		return true
+	var mapped := gltf_path_from_nexus_scene_path(tab)
+	if not mapped.is_empty() and _tab_path_matches(mapped, gltf):
+		return true
+	return _is_imported_gltf_sidecar_tab(tab, gltf)
+
+
+static func tabs_to_close_before_reimport(gltf_paths: Array, open_paths: Array) -> Dictionary:
 	var closing: Array[String] = []
-	for raw in open_paths:
-		var scene_path := str(raw).replace("\\", "/").strip_edges()
-		if scene_path.is_empty():
+	var ambiguous: Array[String] = []
+	var seen_close: Dictionary = {}
+	var seen_ambiguous: Dictionary = {}
+
+	for raw_gltf in gltf_paths:
+		if not raw_gltf is String:
 			continue
-		if is_inherited_or_wrapper_scene(scene_path):
+		var gltf_path: String = str(raw_gltf)
+		if gltf_path.is_empty():
 			continue
-		closing.append(scene_path)
-	return closing
+		for raw_open in open_paths:
+			var tab_path := str(raw_open).replace("\\", "/").strip_edges()
+			if tab_path.is_empty():
+				continue
+			match classify_open_scene_tab(tab_path, gltf_path):
+				TAB_KIND_INSTANCED:
+					if not seen_close.has(tab_path):
+						seen_close[tab_path] = true
+						closing.append(tab_path)
+				TAB_KIND_AMBIGUOUS:
+					if not seen_ambiguous.has(tab_path):
+						seen_ambiguous[tab_path] = true
+						ambiguous.append(tab_path)
+
+	return {"closing": closing, "ambiguous": ambiguous}
+
+
+static func paths_closed_on_gltf_refresh(open_paths: Array, gltf_path: String = "") -> Array[String]:
+	if gltf_path.is_empty():
+		var closing: Array[String] = []
+		for raw in open_paths:
+			var scene_path := str(raw).replace("\\", "/").strip_edges()
+			if scene_path.is_empty():
+				continue
+			if is_inherited_or_wrapper_scene(scene_path):
+				continue
+			closing.append(scene_path)
+		return closing
+	return tabs_to_close_before_reimport([gltf_path], open_paths).get("closing", [])
 
 
 static func should_close_tab_after_inherited_save(saved_path: String, was_open: bool) -> bool:
@@ -125,8 +219,11 @@ static func blocking_path_set_for_gltfs(gltf_paths: Array) -> Dictionary:
 	for raw_path in gltf_paths:
 		if not raw_path is String:
 			continue
-		for related in related_paths_for_gltf(raw_path):
-			blocking[related] = true
+		var gltf := NexusUtils.to_res_gltf_path(str(raw_path))
+		if gltf.is_empty():
+			gltf = str(raw_path).replace("\\", "/").strip_edges()
+		if not gltf.is_empty():
+			blocking[gltf] = true
 	return blocking
 
 
@@ -156,20 +253,29 @@ static func is_neutral_editor_state(editor_interface: EditorInterface) -> bool:
 	return false
 
 
-static func _collect_tabs_to_close(
-	editor_interface: EditorInterface, blocking: Dictionary
-) -> Array[String]:
-	var to_close: Array[String] = []
-	for open_path in editor_interface.get_open_scenes():
-		if blocking.has(open_path):
-			to_close.append(open_path)
-
+static func _open_scene_paths_for_close_plan(editor_interface: EditorInterface) -> Array:
+	var open_paths: Array = []
+	open_paths.append_array(editor_interface.get_open_scenes())
 	var edited_root = editor_interface.get_edited_scene_root()
 	if edited_root != null and not edited_root.scene_file_path.is_empty():
 		var edited_path: String = edited_root.scene_file_path
-		if blocking.has(edited_path) and edited_path not in to_close:
-			to_close.append(edited_path)
-	return paths_closed_on_gltf_refresh(to_close)
+		if edited_path not in open_paths:
+			open_paths.append(edited_path)
+	return open_paths
+
+
+static func _collect_tabs_to_close(
+	editor_interface: EditorInterface, gltf_paths: Array
+) -> Array[String]:
+	if editor_interface == null or gltf_paths.is_empty():
+		return []
+	var plan := tabs_to_close_before_reimport(gltf_paths, _open_scene_paths_for_close_plan(editor_interface))
+	for raw_amb in plan.get("ambiguous", []):
+		push_warning(
+			"Nexus: Ambiguous open scene '%s' during glTF reimport; leaving tab open."
+			% str(raw_amb)
+		)
+	return plan.get("closing", [])
 
 
 static func _clear_edited_flag(editor_interface: EditorInterface) -> void:
@@ -238,10 +344,8 @@ static func close_one_open_nexus_asset_tab_if_any(editor_interface: EditorInterf
 	if editor_interface == null:
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 	if _busy:
-		var busy_blocking := blocking_path_set_for_gltfs(
-			collect_gltf_paths_from_open_nexus_tabs(editor_interface)
-		)
-		var busy_remaining := _collect_tabs_to_close(editor_interface, busy_blocking).size()
+		var busy_gltfs := collect_gltf_paths_from_open_nexus_tabs(editor_interface)
+		var busy_remaining := _collect_tabs_to_close(editor_interface, busy_gltfs).size()
 		return {"closed": closed, "close_errors": close_errors, "remaining": busy_remaining}
 
 	var gltf_paths := collect_gltf_paths_from_open_nexus_tabs(editor_interface)
@@ -252,7 +356,7 @@ static func close_one_open_nexus_asset_tab_if_any(editor_interface: EditorInterf
 	if blocking.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
-	var to_close := _collect_tabs_to_close(editor_interface, blocking)
+	var to_close := _collect_tabs_to_close(editor_interface, gltf_paths)
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
@@ -263,7 +367,7 @@ static func close_one_open_nexus_asset_tab_if_any(editor_interface: EditorInterf
 		closed.append(str(result["closed_path"]))
 	if result.has("err"):
 		close_errors.append({"path": result.get("closed_path", ""), "err": result["err"]})
-	var remaining := _collect_tabs_to_close(editor_interface, blocking).size()
+	var remaining := _collect_tabs_to_close(editor_interface, gltf_paths).size()
 	# Focus-only step still has tabs to close next frame - do not stabilize yet.
 	if remaining == 0 and not result.has("focused_path"):
 		_busy = false
@@ -334,15 +438,10 @@ static func close_open_scenes_for_reimport(
 	if editor_interface == null or gltf_paths.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 	if _busy:
-		var busy_blocking := blocking_path_set_for_gltfs(gltf_paths)
-		var busy_remaining := _collect_tabs_to_close(editor_interface, busy_blocking).size()
+		var busy_remaining := _collect_tabs_to_close(editor_interface, gltf_paths).size()
 		return {"closed": closed, "close_errors": close_errors, "remaining": busy_remaining}
 
-	var blocking := blocking_path_set_for_gltfs(gltf_paths)
-	if blocking.is_empty():
-		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
-
-	var to_close := _collect_tabs_to_close(editor_interface, blocking)
+	var to_close := _collect_tabs_to_close(editor_interface, gltf_paths)
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
@@ -353,7 +452,7 @@ static func close_open_scenes_for_reimport(
 	var safety := 0
 	while safety < 64:
 		safety += 1
-		to_close = _collect_tabs_to_close(editor_interface, blocking)
+		to_close = _collect_tabs_to_close(editor_interface, gltf_paths)
 		if to_close.is_empty():
 			break
 		var result := _close_one_blocking_tab(editor_interface, to_close)
@@ -375,7 +474,7 @@ static func close_open_scenes_for_reimport(
 	stabilize_editor_after_close(editor_interface)
 	NexusEditorViewportGuard.pop_pause(editor_interface)
 
-	var remaining := _collect_tabs_to_close(editor_interface, blocking).size()
+	var remaining := _collect_tabs_to_close(editor_interface, gltf_paths).size()
 	return {"closed": closed, "close_errors": close_errors, "remaining": remaining}
 
 
@@ -397,15 +496,10 @@ static func close_open_scenes_for_reimport_async(
 	if editor_interface == null or gltf_paths.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 	if _busy:
-		var busy_blocking := blocking_path_set_for_gltfs(gltf_paths)
-		var busy_remaining := _collect_tabs_to_close(editor_interface, busy_blocking).size()
+		var busy_remaining := _collect_tabs_to_close(editor_interface, gltf_paths).size()
 		return {"closed": closed, "close_errors": close_errors, "remaining": busy_remaining}
 
-	var blocking := blocking_path_set_for_gltfs(gltf_paths)
-	if blocking.is_empty():
-		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
-
-	var to_close := _collect_tabs_to_close(editor_interface, blocking)
+	var to_close := _collect_tabs_to_close(editor_interface, gltf_paths)
 	if to_close.is_empty():
 		return {"closed": closed, "close_errors": close_errors, "remaining": 0}
 
@@ -415,7 +509,7 @@ static func close_open_scenes_for_reimport_async(
 	var safety := 0
 	while safety < 64:
 		safety += 1
-		to_close = _collect_tabs_to_close(editor_interface, blocking)
+		to_close = _collect_tabs_to_close(editor_interface, gltf_paths)
 		if to_close.is_empty():
 			break
 		var result := _close_one_blocking_tab(editor_interface, to_close)
@@ -439,5 +533,5 @@ static func close_open_scenes_for_reimport_async(
 	await _settle_scene_tree(scene_tree)
 	NexusEditorViewportGuard.pop_pause(editor_interface)
 
-	var remaining := _collect_tabs_to_close(editor_interface, blocking).size()
+	var remaining := _collect_tabs_to_close(editor_interface, gltf_paths).size()
 	return {"closed": closed, "close_errors": close_errors, "remaining": remaining}

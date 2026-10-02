@@ -6,11 +6,6 @@ extends RefCounted
 static var _mass_import_active: bool = false
 static var _force_allow_external_loads: bool = false
 static var _multimesh_wave_active: bool = false
-# Active during a composition reimport that must resolve instance placeholders
-# non-deferred (e.g. ensure_nexus_gltf_imported_async before an inherited build).
-# Makes _on_resources_reimporting skip set_mass_import_active(true) and makes
-# should_defer_external_scene_loads() return false so _post_import bakes the
-# resolved instances into the glTF .import instead of leaving placeholders.
 static var _composition_resolution_reimport: bool = false
 static var _multimesh_post_import_active: bool = false
 static var _levels_needing_instance_pass: Dictionary = {}
@@ -19,6 +14,7 @@ static var _current_instance_pass_path: String = ""
 static var _skipped_instance_pass_levels: Dictionary = {}
 static var _instance_pass_completed_paths: Array[String] = []
 static var _pending_multimesh_retry_paths: Dictionary = {}
+static var _pipeline_completion_pending: bool = false
 
 const MAX_MULTIMESH_REIMPORT_RETRIES := 3
 
@@ -222,3 +218,24 @@ static func peek_multimesh_retry_paths() -> Array[String]:
 	for path in _pending_multimesh_retry_paths.keys():
 		paths.append(path)
 	return paths
+
+
+static func note_pipeline_work_started() -> void:
+	_pipeline_completion_pending = true
+
+
+static func is_pipeline_completion_pending() -> bool:
+	return _pipeline_completion_pending
+
+
+static func try_complete_pipeline_run(pipeline_quiescent: bool) -> bool:
+	return try_emit_import_finished(pipeline_quiescent, false)
+
+
+static func try_emit_import_finished(pipeline_quiescent: bool, scene_work_blocks: bool) -> bool:
+	if not _pipeline_completion_pending:
+		return false
+	if not pipeline_quiescent or scene_work_blocks:
+		return false
+	_pipeline_completion_pending = false
+	return true

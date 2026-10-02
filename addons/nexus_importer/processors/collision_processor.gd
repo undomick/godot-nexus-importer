@@ -114,9 +114,8 @@ func _build_collision_shape_node(
 		)
 		var target_global: Transform3D = safe_global * offset_transform
 		if collision_parent is Node3D:
-			var parent_3d := collision_parent as Node3D
 			var safe_parent_global := NexusTransformSanitize.sanitize(
-				NexusTransformSanitize.composed_global_transform(parent_3d), parent_3d.name
+				NexusTransformSanitize.composed_global_transform(collision_parent), collision_parent.name
 			)
 			col_shape_node.transform = safe_parent_global.affine_inverse() * target_global
 		else:
