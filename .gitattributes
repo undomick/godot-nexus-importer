@@ -1,7 +1,7 @@
 # Auto detect text files and perform LF normalization
-* text=auto eol=lf
+* text=auto
 
-# Exclude from git archive (Asset Library download)
-/build_staging/ export-ignore
-nexus_importer-*.zip export-ignore
-/scripts/ export-ignore
+# Only include the addons folder when downloading from the Asset Library.
+/**        export-ignore
+/addons    !export-ignore
+/addons/** !export-ignore
